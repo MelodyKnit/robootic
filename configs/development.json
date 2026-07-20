@@ -1,0 +1,34 @@
+{
+  "runtime_mode": "development",
+  "camera": {
+    "camera_id": "sim-camera",
+    "calibration_id": "sim-camera-calibration",
+    "mounting": "fixed"
+  },
+  "components": {
+    "vision": "simulated-camera",
+    "plugins": {
+      "perception": "deterministic-perception",
+      "planners": ["demonstration-planner"],
+      "observers": ["audit"]
+    }
+  },
+  "targets": [
+    {
+      "name": "sim-primary",
+      "role": "primary",
+      "robot_adapter": "simulated-robot",
+      "gripper_adapter": "simulated-gripper"
+    },
+    {
+      "name": "sim-mirror",
+      "role": "mirror",
+      "robot_adapter": "simulated-robot",
+      "gripper_adapter": "simulated-gripper"
+    }
+  ],
+  "safety": {
+    "minimum_perception_confidence": 0.7,
+    "maximum_perception_age_seconds": 2.0
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "runtime_mode": "development",
+  "camera": {
+    "camera_id": "sim-camera",
+    "calibration_id": "sim-camera-calibration",
+    "mounting": "fixed"
+  },
+  "components": {
+    "vision": "not-a-registered-adapter",
+    "plugins": {
+      "perception": "deterministic-perception",
+      "planners": ["demonstration-planner"],
+      "observers": ["audit"]
+    }
+  },
+  "targets": []
+}

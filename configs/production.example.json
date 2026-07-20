@@ -1,0 +1,24 @@
+{
+  "runtime_mode": "production",
+  "camera": {
+    "camera_id": "replace-with-camera-id",
+    "calibration_id": "replace-with-calibration-id",
+    "mounting": "fixed"
+  },
+  "components": {
+    "vision": "replace-with-project-local-camera-adapter",
+    "plugins": {
+      "perception": "replace-with-perception-plugin",
+      "planners": ["replace-with-planner-plugin"],
+      "observers": ["audit"]
+    }
+  },
+  "targets": [
+    {
+      "name": "real-primary",
+      "role": "primary",
+      "robot_adapter": "replace-with-jaka-adapter",
+      "gripper_adapter": "replace-with-dh-adapter"
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+[project]
+name = "gripper-ai-controller"
+version = "0.1.0"
+description = "A safety-gated foundation for vision and sensor guided gripper control."
+authors = [{ name = "Robotic Project Team" }]
+readme = "README.md"
+requires-python = ">=3.7,<3.8"
+dependencies = [
+    "pyzmq==25.1.2",
+    "cbor==1.0.0",
+]
+
+[project.scripts]
+gripper-ai-controller = "gripper_ai_controller.cli:main"
+
+[tool.poetry]
+name = "gripper-ai-controller"
+version = "0.1.0"
+description = "A safety-gated foundation for vision and sensor guided gripper control."
+authors = ["Robotic Project Team"]
+packages = [{ include = "gripper_ai_controller", from = "src" }]
+
+[tool.poetry.dependencies]
+python = ">=3.7,<3.8"
+pyzmq = "25.1.2"
+cbor = "1.0.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

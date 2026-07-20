@@ -1,0 +1,54 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# --- Environment ---
+.venv/
+.env
+.env.*
+!.env.example
+
+# --- Build / Dist ---
+build/
+dist/
+*.egg-info/
+*.egg
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS ---
+Thumbs.db
+.DS_Store
+
+# --- Testing ---
+.pytest_cache/
+.mypy_cache/
+.stubs/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.coverage
+
+# --- Project temp (per workspace convention) ---
+temp/
+
+# --- Local runtime storage ---
+logs/
+localstore/*
+!localstore/README.md
+
+# --- System logs (work logs in logs/work/*.md are tracked) ---
+logs/*.log
+logs/*.tmp
+
+# --- virtualenv / poetry ---
+pip-wheel-metadata/
+share/python-wheels/
