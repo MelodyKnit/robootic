@@ -5,6 +5,8 @@
 - `development.json`：安全的内存主目标、镜像目标和相机配置。
 - `tool-camera.json`：包含工具端安装相机标定拓扑的同一安全组件图。
 - `production.example.json`：不可直接运行的模板。在实现项目本地真实适配器前，生产环境保持故障关闭。
+- `jaka-hardware.example.json`：JAKA 连接模板。复制到 `localstore/` 后填入本机控制器地址；默认关闭使能，且不应直接以模板运行。
+- `hikvision-usb.example.json`：海康 USB3 Vision 相机模板。复制到 `localstore/` 后填入相机序列号与真实标定标识；模板不会写入相机参数。
 - `invalid-component.fixture.json`：仅供加载器测试使用的受版本控制的反向测试夹具。
 
 配置文件只包含组件标识符和非敏感运行设置。不得在此放置令牌、密码、私有 IP 地址、标定采集数据、模型权重或可变运行状态；此类内容应存放在 `localstore/`。

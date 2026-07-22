@@ -1,0 +1,40 @@
+{
+  "runtime_mode": "development",
+  "camera": {
+    "camera_id": "hikvision-usb",
+    "calibration_id": "replace-with-local-calibration-id",
+    "mounting": "fixed"
+  },
+  "components": {
+    "vision": "hikvision-camera",
+    "vision_adapter_settings": {
+      "camera_id": "hikvision-usb",
+      "calibration_id": "replace-with-local-calibration-id",
+      "camera_serial": "replace-with-local-camera-serial",
+      "frame_timeout_ms": 1000
+    },
+    "plugins": {
+      "perception": "deterministic-perception",
+      "planners": [
+        "demonstration-planner"
+      ],
+      "observers": [
+        "audit"
+      ]
+    }
+  },
+  "targets": [
+    {
+      "name": "sim-primary",
+      "role": "primary",
+      "robot_adapter": "simulated-robot",
+      "gripper_adapter": "simulated-gripper"
+    },
+    {
+      "name": "sim-mirror",
+      "role": "mirror",
+      "robot_adapter": "simulated-robot",
+      "gripper_adapter": "simulated-gripper"
+    }
+  ]
+}

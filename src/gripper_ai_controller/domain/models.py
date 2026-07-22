@@ -189,6 +189,9 @@ class RobotStatus:
     tcp_pose: Pose3D
     faulted: bool = False
     emergency_stopped: bool = False
+    connected: bool = False
+    powered: bool = False
+    enabled: bool = False
 
 
 @dataclass(frozen=True)

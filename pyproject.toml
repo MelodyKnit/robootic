@@ -19,6 +19,13 @@ version = "0.1.0"
 description = "A safety-gated foundation for vision and sensor guided gripper control."
 authors = ["Robotic Project Team"]
 packages = [{ include = "gripper_ai_controller", from = "src" }]
+exclude = [
+    "src/gripper_ai_controller/adapters/jaka/jkrc.pyd",
+    "src/gripper_ai_controller/adapters/jaka/jakaAPI.dll",
+    "src/gripper_ai_controller/adapters/hikvision/LICENSE-notice.txt",
+    "src/gripper_ai_controller/adapters/hikvision/sdk/**",
+    "src/gripper_ai_controller/adapters/hikvision/runtime/**",
+]
 
 [tool.poetry.dependencies]
 python = ">=3.7,<3.8"

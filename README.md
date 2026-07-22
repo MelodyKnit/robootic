@@ -1,6 +1,6 @@
 # 夹爪 AI 控制器
 
-本项目是一个基于 Python 3.7、无硬件依赖的视觉引导机器人及夹爪工作站基础框架。其运行时采用 NoneBot2 风格的分离架构：小型核心负责生命周期、类型化事件、安全授权和指令调度；适配器和插件均为可独立更新的项目内模块。
+本项目是一个基于 Python 3.7、无硬件依赖的视觉引导机器人及夹爪工作站基础框架。其运行时采用模块化的分离架构：小型核心负责生命周期、类型化事件、安全授权和指令调度；适配器和插件均为可独立更新的项目内模块。
 
 默认开发图是安全自洽的：使用内存中的机器人、夹爪、镜像、相机、规划和感知组件，从不导入厂商 SDK、打开端口、采集真实图像或控制物理设备。
 
@@ -11,7 +11,7 @@
 - 包管理器：Poetry
 - 仿真通信依赖：`pyzmq==25.1.2`、`cbor==1.0.0`
 
-Python 版本限制有意比 `^3.7` 更严格：随附的 JAKA `jkrc` 扩展针对 Python 3.7 64 位编译。
+Python 版本限制有意比 `^3.7` 更严格：本机复制的 JAKA `jkrc` 扩展针对 Python 3.7 64 位编译。
 
 CoppeliaSim 4.10 自带的 `coppeliasim-zmqremoteapi-client` 2.0.4 发布包要求 Python 3.8 或更高，因此不能直接加入本项目。已安装的 `pyzmq` 与 `cbor` 是其 ZeroMQ 协议所需的 Python 3.7 兼容传输依赖；后续实现 `CoppeliaSimAdapter` 时，必须将与本机 CoppeliaSim 版本匹配的官方客户端源码复制到本子项目内，不得从全局安装目录导入。
 
@@ -20,16 +20,23 @@ CoppeliaSim 4.10 自带的 `coppeliasim-zmqremoteapi-client` 2.0.4 发布包要�
 ```powershell
 conda activate robotic
 cd projects/gripper-ai-controller
-pipx run --spec "poetry==1.8.5" poetry install
+poetry install
 poetry run python -m gripper_ai_controller run --config-file configs/development.json --objective "Pick the detected workpiece"
 poetry run python -m gripper_ai_controller run --config-file configs/tool-camera.json
 poetry run python -m gripper_ai_controller reload --config-file configs/development.json --module gripper_ai_controller.plugins.audit
 poetry run python -m unittest discover -s tests -v
+python scripts/check_submission_paths.py
 ```
 
-当前全局 Poetry 2.3.4 无法向 Python 3.7 目标环境注入其解释器探测脚本。项目依赖安装应使用上面的 Poetry 1.8.5 一次性运行命令；它仍由 Poetry 管理依赖，不会使用裸 `pip` 修改项目环境。
+`[project.dependencies]` 是标准依赖声明；`[tool.poetry.dependencies]` 保留相同版本，供 Python 3.7 兼容的 Poetry 1.8.5 运行器使用。由于 Python 3.7 不兼容 Poetry 2.3.4 的解释器探测依赖，Poetry 1.8.5 运行器应将其 `packaging` 固定为 23.2、`virtualenv` 固定为 20.26.6。项目依赖仍必须通过 Poetry 安装，不得使用裸 `pip` 写入 `robotic` 环境。
 
 `reload` 仅在开发模式下可用。生产配置在有明确的本地硬件适配器实现之前，刻意保持"故障关闭"状态。
+
+## 提交前路径检查
+
+`python scripts/check_submission_paths.py` 只扫描 Git 已跟踪或未被忽略的新文件，并在发现文件系统绝对路径时以非零状态退出。它检查 Windows 盘符路径、UNC 路径、`file:` 后接两个斜杠的 URI 和常见 POSIX 绝对路径；URL、CoppeliaSim 场景对象路径和相对路径不会被视为违规。
+
+本地日志、真实标定、采集数据和本机覆盖内容分别位于 `logs/` 与 `localstore/`，均不参与 Git 提交。
 
 ## 组件模型
 
@@ -42,6 +49,18 @@ poetry run python -m unittest discover -s tests -v
 - `localstore/`：Git 忽略的本机运行数据、标定结果、采集物和私密覆盖。
 
 一个执行目标包含一个机器人适配器和一个夹爪适配器。其中一个目标是 `primary`（主目标），其遥测数据具有权威性。镜像目标接收相同的已批准指令 ID，并通过主目标遥测数据进行修正，从而允许未来的 CoppeliaSim 数字孪生安全地跟随真实执行。
+
+## JAKA 安全接入
+
+项目内的 `adapters/jaka/` 提供 JAKA Python SDK 2.1.2 的连接与使能适配器。它已注册为可选的机器人适配器，但不在默认开发配置中启用，也不接受版本化配置中的真实 IP 地址。`configs/jaka-hardware.example.json` 只提供占位模板；真实副本必须保存在 `localstore/`。启动只连接并读取遥测；运动指令在适配器内被拒绝。真实使能必须通过本机私有配置显式允许，并要求控制器已人工上电、急停可用且工作区已清空。`jkrc.pyd` 与 `jakaAPI.dll` 必须从官方 SDK 复制到该适配器目录，但因再分发授权未确认，Git 与 Poetry 构建均不会包含它们。
+
+详细边界和使用方式见 [JAKA 适配器说明](src/gripper_ai_controller/adapters/jaka/README.md)。
+
+## 海康 USB 相机接入
+
+项目内的 `adapters/hikvision/` 提供 MVS USB3 Vision 帧源适配器。它在启动时打开指定相机，在 `capture()` 时复制原始帧，并在关闭时释放 MVS 资源；不会写入触发、曝光、增益、帧率或持久化相机设置。版本化配置只提供占位模板，真实相机序列号和标定标识必须保存于 `localstore/`。MVS Python 封装和 Windows 运行库必须从官方安装包复制到该适配器目录；在取得再分发授权前，它们仅作为本机资产，不随 Git 或 Poetry 构建发布。
+
+详细边界、SDK 文件和验证方式见 [海康适配器说明](src/gripper_ai_controller/adapters/hikvision/README.md)。
 
 ## 视觉边界
 

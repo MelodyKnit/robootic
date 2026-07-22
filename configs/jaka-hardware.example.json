@@ -1,0 +1,38 @@
+{
+  "runtime_mode": "development",
+  "camera": {
+    "camera_id": "sim-camera",
+    "calibration_id": "sim-camera-calibration",
+    "mounting": "fixed"
+  },
+  "components": {
+    "vision": "simulated-camera",
+    "plugins": {
+      "perception": "deterministic-perception",
+      "planners": [
+        "demonstration-planner"
+      ],
+      "observers": [
+        "audit"
+      ]
+    }
+  },
+  "targets": [
+    {
+      "name": "jaka-primary",
+      "role": "primary",
+      "robot_adapter": "jaka-robot",
+      "robot_adapter_settings": {
+        "controller_ip": "replace-with-local-controller-ip",
+        "allow_enable": false
+      },
+      "gripper_adapter": "simulated-gripper"
+    },
+    {
+      "name": "sim-mirror",
+      "role": "mirror",
+      "robot_adapter": "simulated-robot",
+      "gripper_adapter": "simulated-gripper"
+    }
+  ]
+}

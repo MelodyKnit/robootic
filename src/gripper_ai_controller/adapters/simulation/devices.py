@@ -1,7 +1,9 @@
 """Stateful simulation adapters that never open a device, socket, or camera."""
 
 import time
+from dataclasses import replace
 
+from gripper_ai_controller.adapters.base import BaseAdapter, FrameDispatchingVisionAdapter
 from gripper_ai_controller.domain.models import (
     ComponentManifest,
     GripperAction,
@@ -13,10 +15,10 @@ from gripper_ai_controller.domain.models import (
     RobotCommand,
     RobotStatus,
 )
-from gripper_ai_controller.domain.ports import GripperAdapter, RobotAdapter, VisionAdapter
+from gripper_ai_controller.domain.ports import GripperAdapter, RobotAdapter
 
 
-class SimulatedRobotAdapter(RobotAdapter):
+class SimulatedRobotAdapter(BaseAdapter, RobotAdapter):
     """An in-memory six-axis robot representation for primary and mirror targets."""
 
     manifest = ComponentManifest(
@@ -30,17 +32,21 @@ class SimulatedRobotAdapter(RobotAdapter):
     def __init__(self, fail_on_execute: bool = False) -> None:
         """Create a stopped robot state; failure injection is reserved for fault tests."""
 
+        super().__init__()
         self.fail_on_execute = fail_on_execute
         self.status = RobotStatus(
             initialized=False,
             joint_positions_rad=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
             tcp_pose=Pose3D(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, "robot_base"),
+            connected=False,
+            powered=False,
+            enabled=False,
         )
 
     async def initialize(self) -> RobotStatus:
         """Mark the in-memory robot initialized without producing a physical motion."""
 
-        self.status = RobotStatus(True, self.status.joint_positions_rad, self.status.tcp_pose)
+        self.status = replace(self.status, initialized=True, connected=True, powered=True, enabled=True)
         return self.status
 
     async def get_status(self) -> RobotStatus:
@@ -58,9 +64,9 @@ class SimulatedRobotAdapter(RobotAdapter):
         if self.fail_on_execute:
             raise RuntimeError("Simulated robot execution failed.")
         if command.action == RobotAction.MOVE_JOINTS:
-            self.status = RobotStatus(True, command.joint_positions_rad, self.status.tcp_pose)
+            self.status = replace(self.status, initialized=True, joint_positions_rad=command.joint_positions_rad)
         elif command.action == RobotAction.MOVE_LINEAR and command.target_pose is not None:
-            self.status = RobotStatus(True, self.status.joint_positions_rad, command.target_pose)
+            self.status = replace(self.status, initialized=True, tcp_pose=command.target_pose)
         return self.status
 
     async def synchronize(self, status: RobotStatus) -> None:
@@ -69,7 +75,7 @@ class SimulatedRobotAdapter(RobotAdapter):
         self.status = status
 
 
-class SimulatedGripperAdapter(GripperAdapter):
+class SimulatedGripperAdapter(BaseAdapter, GripperAdapter):
     """An in-memory PGI-like gripper representation for primary and mirror targets."""
 
     manifest = ComponentManifest(
@@ -83,6 +89,7 @@ class SimulatedGripperAdapter(GripperAdapter):
     def __init__(self, fail_on_execute: bool = False) -> None:
         """Create an uninitialized open gripper state for safe lifecycle testing."""
 
+        super().__init__()
         self.fail_on_execute = fail_on_execute
         self.status = GripperStatus(initialized=False, position=1000, gripping=False)
 
@@ -122,7 +129,7 @@ class SimulatedGripperAdapter(GripperAdapter):
         self.status = status
 
 
-class SimulatedCameraAdapter(VisionAdapter):
+class SimulatedCameraAdapter(FrameDispatchingVisionAdapter):
     """A healthy synthetic camera that publishes a frame reference, not image I/O."""
 
     manifest = ComponentManifest(
@@ -136,16 +143,19 @@ class SimulatedCameraAdapter(VisionAdapter):
     def __init__(self, healthy: bool = True, frame_reference: str = "simulation://frame-1") -> None:
         """Create a camera with configurable health and metadata-only frame reference."""
 
+        super().__init__()
         self.healthy = healthy
         self.frame_reference = frame_reference
 
     async def capture(self) -> ImageFrame:
-        """Emit one timestamped synthetic frame without reading pixels or a camera device."""
+        """Emit one synthetic frame and notify observers without opening a camera device."""
 
-        return ImageFrame(
+        frame = ImageFrame(
             camera_id="sim-camera",
             captured_at=time.time(),
             frame_reference=self.frame_reference,
             calibration_id="sim-camera-calibration",
             healthy=self.healthy,
         )
+        await self.emit_frame(frame)
+        return frame

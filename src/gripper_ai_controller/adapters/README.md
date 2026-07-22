@@ -10,4 +10,32 @@
 4. 返回规范化状态、帧和错误，而非泄漏厂商 SDK 类型。
 5. 仅通过 `configs/` 模块组装。
 
-未来的 JAKA、DH Robotics、海康威视和 CoppeliaSim 实现各自拥有自己的适配器子包。在实现前将其厂商库复制到本项目中；不要从 `documents/` 导入源码资产。
+`base.py` 中的 `BaseAdapter` 统一处理幂等的异步启动、关闭和启动状态检查。厂商适配器只能在其生命周期钩子中建立或释放连接；不得让 `initialize()`、状态读取或默认运行图隐式改变硬件状态。
+
+厂商 SDK 必须复制到对应适配器子目录，不能从工作区 `documents/` 动态导入。项目内本机副本不等同于可再分发资产：没有明确授权的厂商二进制或封装必须由 `.gitignore` 和 Poetry 排除规则保护，克隆后由使用者从官方 SDK 重新复制。
+
+## 帧观察者
+
+`VisionAdapter.on_frame()` 为每个相机实例注册异步帧观察者。所有项目内相机均通过 `FrameDispatchingVisionAdapter` 实现该契约；观察者在一次 `capture()` 成功构造出完整的 `ImageFrame` 后、返回给调用方前按注册顺序执行。
+
+多相机运行时不存在隐式的全局默认相机，因此必须先绑定具体实例。下面的别名写法支持简洁的装饰器形式：
+
+```python
+on_frame = camera.on_frame
+
+@on_frame()
+async def _(frame):
+    await consume(frame)
+
+frame = await camera.capture()
+```
+
+注册观察者不会启动后台连续取流，也不会改变相机配置。观察者必须使用 `async def` 定义；其异常会返回给本次 `capture()` 调用方，但不会被误标为底层相机设备故障。运行时仍会在 `capture()` 返回后单独发布 `FrameCaptured` 事件，供插件和审计组件使用。
+
+`RobotStatus` 还必须明确报告 `connected`、`powered` 和 `enabled`。安全策略仅会为已初始化、已连接、已上电、已使能且无故障、无急停的机器人授权未来运动；这些状态不能由规划器伪造。
+
+`jaka/` 是首个真实机器人适配器。它将官方 Python SDK 保留在项目内，并将连接、使能和运动严格分离：默认仅允许连接与遥测读取，任何运动指令均被拒绝。
+
+`hikvision/` 是 USB3 Vision 帧源适配器。它将 MVS Python 封装与 Windows x64 运行库保留在项目内，且只暴露帧获取；不包含感知算法，也不写入相机参数。
+
+未来的 DH Robotics 和 CoppeliaSim 实现各自拥有自己的适配器子包。在实现前将其厂商库复制到本项目中；不要从 `documents/` 导入源码资产。

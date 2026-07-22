@@ -1,6 +1,7 @@
 """Lifecycle-enabled ports that isolate core logic from SDKs and simulators."""
 
 from abc import ABC, abstractmethod
+from typing import Awaitable, Callable, Optional, Union
 
 from gripper_ai_controller.domain.models import (
     CommandEnvelope,
@@ -12,6 +13,13 @@ from gripper_ai_controller.domain.models import (
     RobotStatus,
     TelemetrySnapshot,
 )
+
+
+FrameHandler = Callable[[ImageFrame], Awaitable[None]]
+"""An asynchronous observer that receives one successfully acquired image frame."""
+
+FrameHandlerDecorator = Callable[[FrameHandler], FrameHandler]
+"""A decorator returned by a vision adapter to register one frame observer."""
 
 
 class LifecycleComponent(ABC):
@@ -68,6 +76,18 @@ class GripperAdapter(LifecycleComponent):
 
 class VisionAdapter(LifecycleComponent):
     """Acquires image frames and camera health without running perception algorithms."""
+
+    @abstractmethod
+    def on_frame(
+        self, handler: Optional[FrameHandler] = None
+    ) -> Union[FrameHandler, FrameHandlerDecorator]:
+        """Register an asynchronous observer for this adapter's successful captures.
+
+        Calling this method without a handler returns a decorator, allowing callers to
+        write ``@camera.on_frame()`` above an ``async def`` function. The registration
+        belongs to this adapter instance so multiple cameras cannot share observers by
+        accident. Registering an observer does not start background acquisition.
+        """
 
     @abstractmethod
     async def capture(self) -> ImageFrame:

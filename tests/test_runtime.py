@@ -9,7 +9,7 @@ from gripper_ai_controller.adapters.simulation import SimulatedCameraAdapter, Si
 from gripper_ai_controller.bootstrap.runtime_builder import build_runtime, load_runtime_config
 from gripper_ai_controller.configuration import SafetyLimits
 from gripper_ai_controller.core.components import PlannerPlugin
-from gripper_ai_controller.core.events import AdapterFailed, CommandAuthorized, CommandCompleted
+from gripper_ai_controller.core.events import AdapterFailed, CommandAuthorized, CommandCompleted, FrameCaptured
 from gripper_ai_controller.core.runtime import Runtime
 from gripper_ai_controller.domain.models import (
     BoundingBox2D,
@@ -72,6 +72,30 @@ class RuntimeTests(unittest.TestCase):
                 self.assertIn("simulated-camera", runtime.registry.components)
                 self.assertTrue(any(isinstance(event, CommandAuthorized) for event in audit.events))
                 self.assertTrue(any(isinstance(event, CommandCompleted) for event in audit.events))
+            finally:
+                await runtime.shutdown()
+
+        self.run_async(scenario())
+
+    def test_frame_observer_and_runtime_event_receive_one_shared_frame(self):
+        async def scenario():
+            config = load_runtime_config(DEVELOPMENT_CONFIG)
+            received = []
+            on_frame = config.vision.on_frame
+
+            @on_frame()
+            async def record_frame(frame):
+                received.append(frame)
+
+            runtime = Runtime(config)
+            await runtime.startup()
+            try:
+                await runtime.run_objective("Pick")
+                audit = runtime.config.observer_plugins[0]
+                frame_events = [event for event in audit.events if isinstance(event, FrameCaptured)]
+                self.assertEqual(1, len(received))
+                self.assertEqual(1, len(frame_events))
+                self.assertIs(received[0], frame_events[0].frame)
             finally:
                 await runtime.shutdown()
 

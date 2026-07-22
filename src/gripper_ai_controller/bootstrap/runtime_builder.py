@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
+from gripper_ai_controller.adapters.hikvision import HikvisionAdapter
+from gripper_ai_controller.adapters.jaka import JakaAdapter
 from gripper_ai_controller.adapters.simulation import (
     SimulatedCameraAdapter,
     SimulatedGripperAdapter,
@@ -17,9 +19,9 @@ from gripper_ai_controller.plugins import AuditPlugin, DemonstrationPlannerPlugi
 from gripper_ai_controller.services.safety import SafetyPolicy
 
 
-ROBOT_ADAPTERS = {"simulated-robot": SimulatedRobotAdapter}
+ROBOT_ADAPTERS = {"simulated-robot": SimulatedRobotAdapter, "jaka-robot": JakaAdapter}
 GRIPPER_ADAPTERS = {"simulated-gripper": SimulatedGripperAdapter}
-VISION_ADAPTERS = {"simulated-camera": SimulatedCameraAdapter}
+VISION_ADAPTERS = {"simulated-camera": SimulatedCameraAdapter, "hikvision-camera": HikvisionAdapter}
 PERCEPTION_PLUGINS = {"deterministic-perception": DeterministicPerceptionPlugin}
 PLANNER_PLUGINS = {"demonstration-planner": DemonstrationPlannerPlugin}
 OBSERVER_PLUGINS = {"audit": AuditPlugin}
@@ -51,7 +53,12 @@ def load_runtime_config(config_file: str) -> RuntimeConfig:
         raise ValueError("safety must be a JSON object when present.")
     return RuntimeConfig(
         mode=mode,
-        vision=_create(VISION_ADAPTERS, _required_string(components, "vision"), "vision adapter"),
+        vision=_create(
+            VISION_ADAPTERS,
+            _required_string(components, "vision"),
+            "vision adapter",
+            _optional_mapping(components, "vision_adapter_settings"),
+        ),
         calibration=calibration,
         perception_plugin=_create(
             PERCEPTION_PLUGINS, _required_string(plugins, "perception"), "perception plugin"
@@ -86,7 +93,12 @@ def _build_target(settings: Any) -> ExecutionTarget:
     return ExecutionTarget(
         _required_string(settings, "name"),
         _required_enum(settings, "role", TargetRole),
-        _create(ROBOT_ADAPTERS, _required_string(settings, "robot_adapter"), "robot adapter"),
+        _create(
+            ROBOT_ADAPTERS,
+            _required_string(settings, "robot_adapter"),
+            "robot adapter",
+            _optional_mapping(settings, "robot_adapter_settings"),
+        ),
         _create(GRIPPER_ADAPTERS, _required_string(settings, "gripper_adapter"), "gripper adapter"),
     )
 
@@ -127,13 +139,25 @@ def _load_json(config_file: str) -> Dict[str, Any]:
     return payload
 
 
-def _create(factories: Dict[str, Any], name: str, component_type: str) -> Any:
+def _create(
+    factories: Dict[str, Any], name: str, component_type: str, settings: Dict[str, Any] = None
+) -> Any:
     """Instantiate one known safe component by its configured identifier."""
 
     try:
-        return factories[name]()
+        factory = factories[name]
     except KeyError:
         raise ValueError("Unknown {0}: {1}".format(component_type, name))
+    return factory(**(settings or {}))
+
+
+def _optional_mapping(payload: Dict[str, Any], key: str) -> Dict[str, Any]:
+    """Return an optional object field, defaulting to a fresh empty settings mapping."""
+
+    value = payload.get(key, {})
+    if not isinstance(value, dict):
+        raise ValueError("{0} must be a JSON object when present.".format(key))
+    return value
 
 
 def _required_mapping(payload: Dict[str, Any], key: str) -> Dict[str, Any]:

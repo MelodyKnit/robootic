@@ -61,6 +61,12 @@ class SafetyPolicy:
             return SafetyDecision(False, "Robot reports a fault.")
         if not status.initialized:
             return SafetyDecision(False, "Robot must be initialized before motion.")
+        if not status.connected:
+            return SafetyDecision(False, "Robot must be connected before motion.")
+        if not status.powered:
+            return SafetyDecision(False, "Robot must be powered before motion.")
+        if not status.enabled:
+            return SafetyDecision(False, "Robot must be enabled before motion.")
         if command.action.value == "move_joints" and len(command.joint_positions_rad) != 6:
             return SafetyDecision(False, "Joint moves require six joint positions.")
         return SafetyDecision(True, "Command passed deterministic safety checks.")

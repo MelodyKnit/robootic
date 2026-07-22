@@ -40,14 +40,19 @@ coverage.xml
 # --- Project temp (per workspace convention) ---
 temp/
 
-# --- Local runtime storage ---
+# --- Local runtime storage and logs ---
 logs/
 localstore/*
 !localstore/README.md
 
-# --- System logs (work logs in logs/work/*.md are tracked) ---
-logs/*.log
-logs/*.tmp
+# --- License-controlled vendor SDK assets ---
+# Copy these from the official SDK into the documented project-local locations.
+# They are intentionally excluded from Git and distributable Poetry artifacts.
+src/gripper_ai_controller/adapters/jaka/jkrc.pyd
+src/gripper_ai_controller/adapters/jaka/jakaAPI.dll
+src/gripper_ai_controller/adapters/hikvision/LICENSE-notice.txt
+src/gripper_ai_controller/adapters/hikvision/sdk/
+src/gripper_ai_controller/adapters/hikvision/runtime/
 
 # --- virtualenv / poetry ---
 pip-wheel-metadata/
