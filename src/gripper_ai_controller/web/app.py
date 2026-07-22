@@ -1,21 +1,29 @@
-"""FastAPI application factory for the read-only browser camera preview."""
+"""FastAPI application factory for browser camera preview and controlled parameters."""
 
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from gripper_ai_controller.bootstrap.preview_builder import VisionPreviewConfig
+from gripper_ai_controller.domain.models import CameraParameter, CameraParameterApplyMode
+from gripper_ai_controller.domain.ports import CameraParameterError
 from gripper_ai_controller.web.models import CameraPreviewStatus
-from gripper_ai_controller.web.service import CameraPreviewService
+from gripper_ai_controller.web.service import (
+    CameraParameterCapabilityError,
+    CameraParameterOperationError,
+    CameraParameterWriteDisabledError,
+    CameraPreviewService,
+)
 
 
 class ApiErrorResponse(BaseModel):
-    """Stable JSON error payload returned by the read-only preview API."""
+    """Stable JSON error payload returned by the camera preview API."""
 
     code: str
     message: str
@@ -34,7 +42,6 @@ class CameraStatusResponse(BaseModel):
     camera_id: str
     state: str
     latest_frame_at: Optional[float]
-    frame_sequence: Optional[int]
     error: Optional[CameraErrorResponse]
 
 
@@ -42,6 +49,46 @@ class CameraListResponse(BaseModel):
     """A resource-oriented list response retained for future multi-camera expansion."""
 
     cameras: List[CameraStatusResponse]
+
+
+class CameraParameterResponse(BaseModel):
+    """One normalized camera parameter safe to render in the browser."""
+
+    key: str
+    kind: str
+    apply_mode: str
+    value: Any
+    minimum: Optional[float]
+    maximum: Optional[float]
+    step: Optional[float]
+    unit: Optional[str]
+    options: List[str]
+
+
+class CameraParametersResponse(BaseModel):
+    """The current fixed parameter whitelist for one configured camera resource."""
+
+    camera_id: str
+    write_enabled: bool
+    parameters: List[CameraParameterResponse]
+
+
+class CameraParameterUpdateResponse(CameraParametersResponse):
+    """Parameter state returned after one validated browser update request."""
+
+    restarted_acquisition: bool
+
+
+class CameraParameterValueRequest(BaseModel):
+    """One raw JSON scalar preserved for adapter-side type validation."""
+
+    value: Any
+
+
+class CameraParameterBatchRequest(BaseModel):
+    """A batch of restart-required values staged by the browser before explicit save."""
+
+    values: Dict[str, Any]
 
 
 def create_web_app(
@@ -74,6 +121,13 @@ def create_web_app(
     )
     application.state.camera_preview_service = service
 
+    @application.exception_handler(RequestValidationError)
+    async def invalid_request_error(request, error):
+        """Preserve the API error shape when FastAPI rejects malformed JSON input."""
+
+        del request, error
+        return _error_response(422, "invalid_request", "The request body is invalid.")
+
     @application.get("/api/cameras", response_model=CameraListResponse)
     async def list_cameras() -> CameraListResponse:
         """Return the configured camera list without starting any additional capture task."""
@@ -88,6 +142,65 @@ def create_web_app(
         if unknown is not None:
             return unknown
         return _status_response(await service.hub.status())
+
+    @application.get("/api/cameras/{camera_id}/parameters", response_model=CameraParametersResponse)
+    async def camera_parameters(camera_id: str):
+        """Return runtime-supported browser controls without exposing an MVS client."""
+
+        unknown = _unknown_camera_response(camera_id, service.camera_id)
+        if unknown is not None:
+            return unknown
+        try:
+            parameters = await service.get_camera_parameters()
+        except CameraParameterCapabilityError:
+            return _error_response(
+                409,
+                "camera_controls_unavailable",
+                "The configured camera does not support browser parameter controls.",
+            )
+        except (CameraParameterError, CameraParameterOperationError):
+            return _error_response(
+                503,
+                "camera_unavailable",
+                "Camera parameters are temporarily unavailable.",
+            )
+        return _parameter_list_response(service, parameters)
+
+    @application.post(
+        "/api/cameras/{camera_id}/parameters/apply",
+        response_model=CameraParameterUpdateResponse,
+    )
+    async def apply_restart_parameters(camera_id: str, request: CameraParameterBatchRequest):
+        """Apply staged acquisition-locked parameters then resume camera acquisition."""
+
+        unknown = _unknown_camera_response(camera_id, service.camera_id)
+        if unknown is not None:
+            return unknown
+        return await _apply_camera_parameters(
+            service,
+            request.values,
+            CameraParameterApplyMode.RESTART,
+        )
+
+    @application.patch(
+        "/api/cameras/{camera_id}/parameters/{parameter_key}",
+        response_model=CameraParameterUpdateResponse,
+    )
+    async def update_live_parameter(
+        camera_id: str,
+        parameter_key: str,
+        request: CameraParameterValueRequest,
+    ):
+        """Apply one stream-safe parameter immediately after adapter validation."""
+
+        unknown = _unknown_camera_response(camera_id, service.camera_id)
+        if unknown is not None:
+            return unknown
+        return await _apply_camera_parameters(
+            service,
+            {parameter_key: request.value},
+            CameraParameterApplyMode.LIVE,
+        )
 
     @application.get("/api/cameras/{camera_id}/frame")
     async def camera_frame(camera_id: str):
@@ -106,10 +219,7 @@ def create_web_app(
         return Response(
             content=frame.jpeg_payload,
             media_type="image/jpeg",
-            headers={
-                "Cache-Control": "no-store",
-                "X-Frame-Sequence": str(frame.sequence),
-            },
+            headers={"Cache-Control": "no-store"},
         )
 
     @application.get("/api/cameras/{camera_id}/stream")
@@ -123,12 +233,12 @@ def create_web_app(
         async def generate_mjpeg():
             """Yield each newest JPEG once per client without allocating a second camera loop."""
 
-            sequence = 0
+            previous_frame = None
             while True:
-                frame = await service.hub.wait_for_frame(sequence)
+                frame = await service.hub.wait_for_frame(previous_frame)
                 if frame is None:
                     return
-                sequence = frame.sequence
+                previous_frame = frame
                 yield (
                     b"--frame\r\n"
                     b"Content-Type: image/jpeg\r\n"
@@ -157,7 +267,6 @@ def _status_response(status: CameraPreviewStatus):
         "camera_id": status.camera_id,
         "state": status.state,
         "latest_frame_at": status.latest_frame_at,
-        "frame_sequence": status.frame_sequence,
         "error": error,
     }
 
@@ -174,6 +283,72 @@ def _error_response(status_code: int, code: str, message: str) -> JSONResponse:
     """Return a normalized JSON error rather than FastAPI's framework-specific detail shape."""
 
     return JSONResponse(status_code=status_code, content={"code": code, "message": message})
+
+
+async def _apply_camera_parameters(
+    service: CameraPreviewService,
+    updates: Dict[str, Any],
+    expected_apply_mode: CameraParameterApplyMode,
+):
+    """Map the controlled service facade's update failures to stable HTTP errors."""
+
+    try:
+        result = await service.update_camera_parameters(updates, expected_apply_mode)
+    except CameraParameterWriteDisabledError:
+        return _error_response(
+            403,
+            "camera_controls_disabled",
+            "Camera parameter writes are disabled by the local preview configuration.",
+        )
+    except CameraParameterCapabilityError:
+        return _error_response(
+            409,
+            "camera_controls_unavailable",
+            "The configured camera does not support browser parameter controls.",
+        )
+    except CameraParameterError as error:
+        return _error_response(422, "invalid_camera_parameter", str(error))
+    except CameraParameterOperationError:
+        return _error_response(
+            503,
+            "camera_parameter_apply_failed",
+            "The camera could not apply the requested parameter update.",
+        )
+    return _parameter_update_response(service, result.parameters, result.restarted_acquisition)
+
+
+def _parameter_list_response(service: CameraPreviewService, parameters):
+    """Map immutable domain parameter descriptors to a browser-safe API response."""
+
+    return {
+        "camera_id": service.camera_id,
+        "write_enabled": service.camera_controls_enabled,
+        "parameters": [_parameter_response(parameter) for parameter in parameters],
+    }
+
+
+def _parameter_update_response(service: CameraPreviewService, parameters, restarted_acquisition: bool):
+    """Add the observed restart outcome to the standard parameter list response."""
+
+    response = _parameter_list_response(service, parameters)
+    response["restarted_acquisition"] = restarted_acquisition
+    return response
+
+
+def _parameter_response(parameter: CameraParameter):
+    """Serialize one adapter-normalized value without vendor node names or SDK handles."""
+
+    return {
+        "key": parameter.key,
+        "kind": parameter.kind.value,
+        "apply_mode": parameter.apply_mode.value,
+        "value": parameter.value,
+        "minimum": parameter.minimum,
+        "maximum": parameter.maximum,
+        "step": parameter.step,
+        "unit": parameter.unit,
+        "options": list(parameter.options),
+    }
 
 
 def _mount_frontend_if_present(application: FastAPI, frontend_dist_dir: Optional[str]) -> None:

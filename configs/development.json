@@ -37,6 +37,7 @@
     "frontend_dist_dir": "src/web/dist",
     "stream_fps": 10,
     "jpeg_quality": 80,
-    "capture_retry_seconds": 1.0
+    "capture_retry_seconds": 1.0,
+    "camera_controls_enabled": true
   }
 }

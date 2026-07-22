@@ -36,6 +36,6 @@ frame = await camera.capture()
 
 `jaka/` 是首个真实机器人适配器。它将官方 Python SDK 保留在项目内，并将连接、使能和运动严格分离：默认仅允许连接与遥测读取，任何运动指令均被拒绝。
 
-`hikvision/` 是 USB3 Vision 帧源适配器。它将 MVS Python 封装与 Windows x64 运行库保留在项目内，且只暴露帧获取；不包含感知算法，也不写入相机参数。
+`hikvision/` 是 USB3 Vision 帧源和受限参数适配器。它将 MVS Python 封装与 Windows x64 运行库保留在项目内，并通过独立的 `CameraParameterAdapter` 端口公开固定白名单的运行时参数；不包含感知算法，不接受任意 MVS 节点、触发设置或持久化相机配置。具体白名单、并发锁和网页访问许可见 [海康适配器说明](hikvision/README.md)。
 
 未来的 DH Robotics 和 CoppeliaSim 实现各自拥有自己的适配器子包。在实现前将其厂商库复制到本项目中；不要从 `documents/` 导入源码资产。

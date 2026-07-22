@@ -1,4 +1,4 @@
-"""Offline tests for the read-only FastAPI camera preview boundary."""
+"""Offline tests for the FastAPI camera preview and bounded parameter boundary."""
 
 import asyncio
 import json
@@ -17,6 +17,7 @@ from gripper_ai_controller.adapters.simulation import SimulatedCameraAdapter
 from gripper_ai_controller.bootstrap.preview_builder import VisionPreviewConfig, load_vision_preview_config
 from gripper_ai_controller.configuration import WebPreviewSettings
 from gripper_ai_controller.domain.models import ImageFrame
+from gripper_ai_controller.domain.ports import VisionAdapter
 from gripper_ai_controller.web import create_web_app
 from gripper_ai_controller.web.codec import FrameEncodingError, JpegFrameEncoder
 from gripper_ai_controller.web.service import CameraPreviewService
@@ -129,6 +130,7 @@ class PreviewConfigurationTests(unittest.TestCase):
         self.assertIsInstance(preview.vision, SimulatedCameraAdapter)
         self.assertFalse(preview.vision.started)
         self.assertEqual(10, preview.settings.stream_fps)
+        self.assertTrue(preview.settings.camera_controls_enabled)
 
     def test_rejects_unknown_or_invalid_web_settings(self):
         payload = {
@@ -152,6 +154,11 @@ class PreviewConfigurationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "relative directory"):
                 load_vision_preview_config(str(config_path))
 
+            payload["web"] = {"camera_controls_enabled": "yes"}
+            config_path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "camera_controls_enabled"):
+                load_vision_preview_config(str(config_path))
+
 
 class CameraPreviewServiceTests(unittest.TestCase):
     """Verify camera retry and one-frame fan-out without a network listener or hardware."""
@@ -171,10 +178,10 @@ class CameraPreviewServiceTests(unittest.TestCase):
             )
             await service.startup()
             try:
-                await wait_for_sequence(service, 1)
+                await wait_for_frame(service)
                 status = await service.hub.status()
                 self.assertEqual("streaming", status.state)
-                self.assertEqual(1, status.frame_sequence)
+                self.assertIsNotNone(status.latest_frame_at)
                 self.assertGreaterEqual(adapter.startup_calls, 3)
                 self.assertGreaterEqual(adapter.shutdown_calls, 1)
             finally:
@@ -193,7 +200,7 @@ class CameraPreviewServiceTests(unittest.TestCase):
             application = create_web_app_from_service(service)
             await service.startup()
             try:
-                await wait_for_sequence(service, 1)
+                await wait_for_frame(service)
                 first_status, first_type, first_chunk = await request_first_stream_chunk(
                     application, "/api/cameras/camera-a/stream"
                 )
@@ -224,6 +231,8 @@ class CameraPreviewHttpTests(unittest.TestCase):
             self.assertEqual(200, client.get("/api/cameras").status_code)
             ready = wait_for_http_frame(client, "/api/cameras/camera-a/frame")
             self.assertEqual("image/jpeg", ready.headers["content-type"])
+            self.assertNotIn("x-frame-sequence", ready.headers)
+            self.assertNotIn("frame_sequence", client.get("/api/cameras/camera-a/status").json())
             self.assertEqual(200, client.get("/api/cameras/camera-a/status").status_code)
 
             unknown = client.get("/api/cameras/missing/status")
@@ -257,12 +266,88 @@ class CameraPreviewHttpTests(unittest.TestCase):
             self.assertEqual("camera_unavailable", status.json()["error"]["code"])
             self.assertEqual(503, client.get("/api/cameras/camera-a/frame").status_code)
 
+    def test_parameter_endpoints_apply_live_and_restart_updates_with_simulated_camera(self):
+        application = create_preview_application(SimulatedCameraAdapter(), camera_controls_enabled=True)
 
-def create_preview_application(adapter: FakeVisionAdapter):
+        with TestClient(application) as client:
+            wait_for_http_frame(client, "/api/cameras/camera-a/frame")
+            parameters = client.get("/api/cameras/camera-a/parameters")
+            self.assertEqual(200, parameters.status_code)
+            self.assertTrue(parameters.json()["write_enabled"])
+            self.assertIn("exposure_time_us", [item["key"] for item in parameters.json()["parameters"]])
+
+            live = client.patch(
+                "/api/cameras/camera-a/parameters/exposure_time_us",
+                json={"value": 12000.0},
+            )
+            self.assertEqual(200, live.status_code)
+            self.assertFalse(live.json()["restarted_acquisition"])
+            exposure = next(item for item in live.json()["parameters"] if item["key"] == "exposure_time_us")
+            self.assertEqual(12000.0, exposure["value"])
+
+            restarted = client.post(
+                "/api/cameras/camera-a/parameters/apply",
+                json={"values": {"pixel_format": "Mono8"}},
+            )
+            self.assertEqual(200, restarted.status_code)
+            self.assertTrue(restarted.json()["restarted_acquisition"])
+            pixel_format = next(item for item in restarted.json()["parameters"] if item["key"] == "pixel_format")
+            self.assertEqual("Mono8", pixel_format["value"])
+
+    def test_parameter_writes_require_local_configuration_and_correct_apply_mode(self):
+        application = create_preview_application(SimulatedCameraAdapter(), camera_controls_enabled=False)
+
+        with TestClient(application) as client:
+            parameters = client.get("/api/cameras/camera-a/parameters")
+            self.assertEqual(200, parameters.status_code)
+            self.assertFalse(parameters.json()["write_enabled"])
+
+            disabled = client.patch(
+                "/api/cameras/camera-a/parameters/exposure_time_us",
+                json={"value": 12000.0},
+            )
+            self.assertEqual(403, disabled.status_code)
+            self.assertEqual("camera_controls_disabled", disabled.json()["code"])
+
+        enabled_application = create_preview_application(SimulatedCameraAdapter(), camera_controls_enabled=True)
+        with TestClient(enabled_application) as client:
+            wait_for_http_frame(client, "/api/cameras/camera-a/frame")
+            wrong_mode = client.patch(
+                "/api/cameras/camera-a/parameters/pixel_format",
+                json={"value": "Mono8"},
+            )
+            self.assertEqual(422, wrong_mode.status_code)
+            self.assertEqual("invalid_camera_parameter", wrong_mode.json()["code"])
+
+            invalid_value = client.patch(
+                "/api/cameras/camera-a/parameters/gain_db",
+                json={"value": 100.0},
+            )
+            self.assertEqual(422, invalid_value.status_code)
+            self.assertEqual("invalid_camera_parameter", invalid_value.json()["code"])
+
+            malformed = client.post("/api/cameras/camera-a/parameters/apply", json={})
+            self.assertEqual(422, malformed.status_code)
+            self.assertEqual("invalid_request", malformed.json()["code"])
+
+            unavailable = client.get("/api/cameras/camera-a/parameters")
+            self.assertEqual(200, unavailable.status_code)
+
+            unknown = client.get("/api/cameras/missing/parameters")
+            self.assertEqual(404, unknown.status_code)
+
+
+def create_preview_application(adapter: VisionAdapter, camera_controls_enabled: bool = False):
     """Create an app that uses a fake adapter and never creates runtime targets."""
 
     preview = VisionPreviewConfig(
-        "camera-a", adapter, WebPreviewSettings(stream_fps=30, capture_retry_seconds=0.01)
+        "camera-a",
+        adapter,
+        WebPreviewSettings(
+            stream_fps=30,
+            capture_retry_seconds=0.01,
+            camera_controls_enabled=camera_controls_enabled,
+        ),
     )
     return create_web_app(preview)
 
@@ -274,12 +359,12 @@ def create_web_app_from_service(service: CameraPreviewService):
     return create_web_app(preview, preview_service=service)
 
 
-async def wait_for_sequence(service: CameraPreviewService, sequence: int) -> None:
-    """Wait briefly for a background capture without introducing a hardware-dependent timeout."""
+async def wait_for_frame(service: CameraPreviewService) -> None:
+    """Wait briefly for a background capture without tracking an image sequence number."""
 
     for _ in range(100):
         status = await service.hub.status()
-        if status.frame_sequence is not None and status.frame_sequence >= sequence:
+        if status.latest_frame_at is not None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError("The fake camera did not publish a frame in time.")

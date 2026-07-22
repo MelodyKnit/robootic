@@ -36,7 +36,7 @@ async def _reload(args: argparse.Namespace) -> None:
 
 
 def _web(args: argparse.Namespace) -> None:
-    """Run the read-only FastAPI camera preview without constructing the runtime."""
+    """Run isolated FastAPI camera preview without constructing the execution runtime."""
 
     import uvicorn
 
@@ -70,7 +70,7 @@ def main() -> None:
     reload_command = subparsers.add_parser("reload", help="Explicitly reload development modules.")
     reload_command.add_argument("--config-file", default="configs/development.json")
     reload_command.add_argument("--module", action="append")
-    web = subparsers.add_parser("web", help="Run the read-only camera preview web service.")
+    web = subparsers.add_parser("web", help="Run the isolated camera preview web service.")
     web.add_argument("--config-file", default="configs/development.json")
     web.add_argument("--host")
     web.add_argument("--port", type=int)

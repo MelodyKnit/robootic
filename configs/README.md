@@ -6,7 +6,7 @@
 - `tool-camera.json`：包含工具端安装相机标定拓扑的同一安全组件图。
 - `production.example.json`：不可直接运行的模板。在实现项目本地真实适配器前，生产环境保持故障关闭。
 - `jaka-hardware.example.json`：JAKA 连接模板。复制到 `localstore/` 后填入本机控制器地址；默认关闭使能，且不应直接以模板运行。
-- `hikvision-usb.example.json`：海康 USB3 Vision 相机模板。复制到 `localstore/` 后填入相机序列号与真实标定标识；模板不会写入相机参数。
+- `hikvision-usb.example.json`：海康 USB3 Vision 相机模板。复制到 `localstore/` 后填入相机序列号与真实标定标识；模板默认禁止网页写入相机参数。
 - `invalid-component.fixture.json`：仅供加载器测试使用的受版本控制的反向测试夹具。
 
 配置文件只包含组件标识符和非敏感运行设置。不得在此放置令牌、密码、私有 IP 地址、标定采集数据、模型权重或可变运行状态；此类内容应存放在 `localstore/`。
@@ -21,7 +21,10 @@
 - `stream_fps`：`10`，范围为 `1` 至 `30`；
 - `jpeg_quality`：`80`，范围为 `1` 至 `95`；
 - `capture_retry_seconds`：`1.0`，范围为 `0.1` 至 `30`。
+- `camera_controls_enabled`：`false`，严格布尔值。设为 `true` 后允许网页写入当前相机适配器公开的固定参数白名单；版本化海康模板必须保持 `false`，真实写入仅可在 `localstore/` 本机配置显式开启。
 
 网页服务只读取上述设置和 `camera`、`components.vision`、`components.vision_adapter_settings`。即使同一配置还声明 `targets`、插件或安全设置，它也不会构建或启动它们。真实序列号、真实标定标识和本机覆盖仍必须置于被 Git 忽略的 `localstore/` 配置文件。
+
+参数写入不会调用相机的 `FeatureSave`、`UserSetSave` 或任何持久化命令。它只影响当前连接会话；需要停止采集的参数会由后端在同一采集锁内停止取流、写入并恢复取流。由于默认监听地址可被局域网访问，开启 `camera_controls_enabled` 前必须确认网络受信任。
 
 请从子项目根目录启动 CLI，使默认 `src/web/dist` 相对于该项目解析。服务不会通过源码位置或仓库遍历推导此目录。

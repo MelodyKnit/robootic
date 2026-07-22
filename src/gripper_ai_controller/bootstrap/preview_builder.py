@@ -1,4 +1,4 @@
-"""Build the read-only vision-preview graph from an explicit JSON configuration."""
+"""Build the isolated vision-preview graph from an explicit JSON configuration."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,6 +57,7 @@ def _build_web_settings(settings):
         "stream_fps",
         "jpeg_quality",
         "capture_retry_seconds",
+        "camera_controls_enabled",
     }
     unknown = set(settings).difference(allowed)
     if unknown:
@@ -67,6 +68,7 @@ def _build_web_settings(settings):
     stream_fps = _integer_setting(settings, "stream_fps", 10, 1, 30)
     jpeg_quality = _integer_setting(settings, "jpeg_quality", 80, 1, 95)
     retry_seconds = _number_setting(settings, "capture_retry_seconds", 1.0, 0.1, 30.0)
+    camera_controls_enabled = _boolean_setting(settings, "camera_controls_enabled", False)
     return WebPreviewSettings(
         bind_host=bind_host,
         port=port,
@@ -74,6 +76,7 @@ def _build_web_settings(settings):
         stream_fps=stream_fps,
         jpeg_quality=jpeg_quality,
         capture_retry_seconds=retry_seconds,
+        camera_controls_enabled=camera_controls_enabled,
     )
 
 
@@ -88,6 +91,7 @@ def validate_web_settings(settings: WebPreviewSettings) -> WebPreviewSettings:
             "stream_fps": settings.stream_fps,
             "jpeg_quality": settings.jpeg_quality,
             "capture_retry_seconds": settings.capture_retry_seconds,
+            "camera_controls_enabled": settings.camera_controls_enabled,
         }
     )
 
@@ -121,3 +125,12 @@ def _number_setting(settings, key, default, minimum, maximum):
     if type(value) not in (int, float) or value < minimum or value > maximum:
         raise ValueError("web.{0} must be a number from {1} to {2}.".format(key, minimum, maximum))
     return float(value)
+
+
+def _boolean_setting(settings, key, default):
+    """Return one strict JSON boolean without coercing strings or integer flags."""
+
+    value = settings.get(key, default)
+    if type(value) is not bool:
+        raise ValueError("web.{0} must be a boolean.".format(key))
+    return value

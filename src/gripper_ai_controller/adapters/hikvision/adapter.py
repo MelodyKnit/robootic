@@ -1,31 +1,104 @@
-"""Hikvision USB3 Vision adapter that acquires frames without camera reconfiguration."""
+"""Hikvision USB3 Vision adapter with bounded acquisition and parameter controls."""
 
 import asyncio
+import math
 import time
-from typing import Any, Callable, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Mapping, Optional, Tuple
 
 from gripper_ai_controller.adapters.base import FrameDispatchingVisionAdapter
 from gripper_ai_controller.adapters.hikvision.client import MvsCapturedFrame, MvsUsbCameraClient
-from gripper_ai_controller.domain.models import ComponentManifest, ImageFrame
+from gripper_ai_controller.domain.models import (
+    CameraParameter,
+    CameraParameterApplyMode,
+    CameraParameterKind,
+    CameraParameterUpdateResult,
+    CameraParameterValue,
+    ComponentManifest,
+    ImageFrame,
+)
+from gripper_ai_controller.domain.ports import CameraParameterAdapter, CameraParameterError
 
 
 class HikvisionAdapterError(RuntimeError):
     """Report a normalized Hikvision adapter failure without exposing MVS SDK types."""
 
 
-class HikvisionAdapter(FrameDispatchingVisionAdapter):
+@dataclass(frozen=True)
+class _CameraParameterNode:
+    """Map one browser-safe parameter identifier to one fixed MVS feature node."""
+
+    key: str
+    node_name: str
+    kind: CameraParameterKind
+    apply_mode: CameraParameterApplyMode
+    unit: Optional[str] = None
+
+
+_CAMERA_PARAMETER_NODES = (
+    _CameraParameterNode(
+        "exposure_auto",
+        "ExposureAuto",
+        CameraParameterKind.ENUM,
+        CameraParameterApplyMode.LIVE,
+    ),
+    _CameraParameterNode(
+        "exposure_time_us",
+        "ExposureTime",
+        CameraParameterKind.FLOAT,
+        CameraParameterApplyMode.LIVE,
+        "us",
+    ),
+    _CameraParameterNode(
+        "gain_auto",
+        "GainAuto",
+        CameraParameterKind.ENUM,
+        CameraParameterApplyMode.LIVE,
+    ),
+    _CameraParameterNode(
+        "gain_db",
+        "Gain",
+        CameraParameterKind.FLOAT,
+        CameraParameterApplyMode.LIVE,
+        "dB",
+    ),
+    _CameraParameterNode(
+        "frame_rate_enabled",
+        "AcquisitionFrameRateEnable",
+        CameraParameterKind.BOOLEAN,
+        CameraParameterApplyMode.LIVE,
+    ),
+    _CameraParameterNode(
+        "frame_rate_fps",
+        "AcquisitionFrameRate",
+        CameraParameterKind.FLOAT,
+        CameraParameterApplyMode.LIVE,
+        "fps",
+    ),
+    _CameraParameterNode(
+        "pixel_format",
+        "PixelFormat",
+        CameraParameterKind.ENUM,
+        CameraParameterApplyMode.RESTART,
+    ),
+)
+"""The only MVS nodes browser clients can inspect or update in this adapter."""
+
+
+class HikvisionAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapter):
     """Acquire raw frames from one MVS USB3 Vision camera.
 
-    This adapter does not run inference and never writes trigger, exposure, gain, frame-rate,
-    persistence, or other device parameters. A configured serial chooses one camera; omitting it
-    is allowed only when exactly one MVS USB camera is enumerated.
+    This adapter does not run inference. Its parameter capability is deliberately limited to
+    exposure, gain, frame-rate, and pixel-format nodes defined above; it never exposes arbitrary
+    MVS node names, trigger control, UserSet persistence, or raw SDK clients. A configured serial
+    chooses one camera; omitting it is allowed only when exactly one MVS USB camera is enumerated.
     """
 
     manifest = ComponentManifest(
         "hikvision-camera",
         "0.1.0",
         "vision",
-        ("vision", "mvs", "usb3-vision", "frame-source", "parameter-write-disabled"),
+        ("vision", "mvs", "usb3-vision", "frame-source", "camera-parameters"),
         "HikvisionAdapter",
     )
 
@@ -52,7 +125,6 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter):
         self._client = None  # type: Optional[Any]
         self._connected = False
         self._healthy = False
-        self._frame_sequence = 0
         self._capture_lock = None  # type: Optional[Any]
 
     @property
@@ -74,7 +146,7 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter):
         return MvsUsbCameraClient()
 
     async def on_startup(self) -> None:
-        """Open the selected MVS USB camera without starting acquisition or writing parameters."""
+        """Open the selected MVS USB camera without starting acquisition or changing settings."""
 
         self._client = self.client_factory()
         try:
@@ -121,12 +193,11 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter):
             if not isinstance(captured_frame, MvsCapturedFrame):
                 self._healthy = False
                 raise HikvisionAdapterError("The Hikvision MVS client returned an invalid normalized frame.")
-            self._frame_sequence += 1
             self._healthy = True
             frame = ImageFrame(
                 camera_id=self.camera_id,
                 captured_at=time.time(),
-                frame_reference="mvs://{0}/frame-{1}".format(self.camera_id, self._frame_sequence),
+                frame_reference="mvs://{0}/live".format(self.camera_id),
                 calibration_id=self.calibration_id,
                 healthy=True,
                 pixel_payload=captured_frame.pixel_payload,
@@ -136,6 +207,59 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter):
             )
             await self.emit_frame(frame)
             return frame
+
+    async def get_camera_parameters(self) -> Tuple[CameraParameter, ...]:
+        """Read the current runtime-supported whitelist without exposing vendor nodes.
+
+        A camera model can omit a node or make it unavailable in its current state. Those
+        individual entries are omitted instead of inventing ranges or options; an all-node
+        failure remains an adapter error so the web service can report the camera unavailable.
+        """
+
+        self.ensure_started()
+        async with self._capture_lock_for_current_loop():
+            return await self._read_supported_parameters()
+
+    async def update_camera_parameters(
+        self, updates: Mapping[str, CameraParameterValue]
+    ) -> CameraParameterUpdateResult:
+        """Validate and apply fixed-whitelist settings without persisting them to the device.
+
+        Capture, node writes, and stop/start acquisition all share one lock. Parameters marked
+        ``restart`` stop only the stream, apply their values, and always attempt to restart the
+        stream before the result or error leaves this adapter.
+        """
+
+        self.ensure_started()
+        if not updates:
+            raise CameraParameterError("At least one camera parameter update is required.")
+        async with self._capture_lock_for_current_loop():
+            parameters = await self._read_supported_parameters()
+            parameter_by_key = {parameter.key: parameter for parameter in parameters}
+            normalized_updates = self._normalize_updates(updates, parameter_by_key)
+            self._validate_parameter_dependencies(parameter_by_key, normalized_updates)
+            restart_required = any(
+                parameter_by_key[key].apply_mode == CameraParameterApplyMode.RESTART
+                for key in normalized_updates
+            )
+            try:
+                if restart_required:
+                    await self._call_client_method("stop_grabbing")
+                try:
+                    await self._write_parameters(normalized_updates)
+                finally:
+                    if restart_required:
+                        await self._call_client_method("start_grabbing")
+                updated_parameters = await self._read_supported_parameters()
+            except CameraParameterError:
+                raise
+            except Exception as error:
+                self._healthy = False
+                raise HikvisionAdapterError(
+                    "Unable to apply the requested Hikvision camera parameter update."
+                ) from error
+            self._healthy = True
+            return CameraParameterUpdateResult(updated_parameters, restart_required)
 
     async def _call_client_method(self, method_name: str, *arguments: Any) -> Any:
         """Run one blocking MVS client operation outside the asyncio event-loop thread."""
@@ -158,6 +282,124 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter):
             except Exception:
                 pass
             raise
+
+    async def _read_supported_parameters(self) -> Tuple[CameraParameter, ...]:
+        """Read every available fixed node, skipping features unsupported by this camera model."""
+
+        parameters = []
+        for definition in _CAMERA_PARAMETER_NODES:
+            try:
+                parameters.append(await self._read_parameter(definition))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # MVS reports unsupported, unavailable, or access-locked optional nodes through
+                # the same result channel. The whitelist is intentionally capability-driven.
+                continue
+        if not parameters:
+            raise HikvisionAdapterError("No supported Hikvision camera parameters are currently readable.")
+        return tuple(parameters)
+
+    async def _read_parameter(self, definition: _CameraParameterNode) -> CameraParameter:
+        """Map one vendor node value and device-reported constraints to a normalized descriptor."""
+
+        if definition.kind == CameraParameterKind.FLOAT:
+            value = await self._call_client_method("get_float_node", definition.node_name)
+            return CameraParameter(
+                key=definition.key,
+                kind=definition.kind,
+                apply_mode=definition.apply_mode,
+                value=float(value.value),
+                minimum=float(value.minimum),
+                maximum=float(value.maximum),
+                unit=definition.unit,
+            )
+        if definition.kind == CameraParameterKind.ENUM:
+            value = await self._call_client_method("get_enum_node", definition.node_name)
+            return CameraParameter(
+                key=definition.key,
+                kind=definition.kind,
+                apply_mode=definition.apply_mode,
+                value=value.value,
+                unit=definition.unit,
+                options=tuple(value.options),
+            )
+        value = await self._call_client_method("get_bool_node", definition.node_name)
+        return CameraParameter(
+            key=definition.key,
+            kind=definition.kind,
+            apply_mode=definition.apply_mode,
+            value=bool(value.value),
+            unit=definition.unit,
+        )
+
+    @staticmethod
+    def _normalize_updates(
+        updates: Mapping[str, CameraParameterValue],
+        parameter_by_key: Mapping[str, CameraParameter],
+    ) -> Mapping[str, CameraParameterValue]:
+        """Reject unknown, malformed, or out-of-range values before calling the vendor SDK."""
+
+        normalized = {}
+        for key, value in updates.items():
+            parameter = parameter_by_key.get(key)
+            if parameter is None:
+                raise CameraParameterError("The requested camera parameter is unavailable.")
+            if parameter.kind == CameraParameterKind.FLOAT:
+                if type(value) not in (int, float) or not math.isfinite(float(value)):
+                    raise CameraParameterError("The requested camera parameter requires a finite number.")
+                numeric_value = float(value)
+                if parameter.minimum is None or parameter.maximum is None:
+                    raise CameraParameterError("The camera did not report a writable numeric range.")
+                if numeric_value < parameter.minimum or numeric_value > parameter.maximum:
+                    raise CameraParameterError("The requested camera parameter value is outside the device range.")
+                normalized[key] = numeric_value
+            elif parameter.kind == CameraParameterKind.ENUM:
+                if not isinstance(value, str) or value not in parameter.options:
+                    raise CameraParameterError("The requested camera enum value is not supported by the device.")
+                normalized[key] = value
+            elif type(value) is bool:
+                normalized[key] = value
+            else:
+                raise CameraParameterError("The requested camera parameter requires a boolean value.")
+        return normalized
+
+    @staticmethod
+    def _validate_parameter_dependencies(
+        parameters: Mapping[str, CameraParameter],
+        updates: Mapping[str, CameraParameterValue],
+    ) -> None:
+        """Enforce device feature dependencies even when a caller bypasses the web UI."""
+
+        projected = {key: parameter.value for key, parameter in parameters.items()}
+        projected.update(updates)
+        if "exposure_time_us" in updates and projected.get("exposure_auto") not in (None, "Off"):
+            raise CameraParameterError("Manual exposure requires automatic exposure to be Off.")
+        if "gain_db" in updates and projected.get("gain_auto") not in (None, "Off"):
+            raise CameraParameterError("Manual gain requires automatic gain to be Off.")
+        if "frame_rate_fps" in updates and projected.get("frame_rate_enabled") is not True:
+            raise CameraParameterError("Manual frame rate requires frame-rate control to be enabled.")
+
+    async def _write_parameters(self, updates: Mapping[str, CameraParameterValue]) -> None:
+        """Write a validated batch in dependency order without calling MVS persistence features."""
+
+        for definition in _CAMERA_PARAMETER_NODES:
+            if definition.key not in updates:
+                continue
+            value = updates[definition.key]
+            if definition.kind == CameraParameterKind.FLOAT:
+                await self._call_client_method("set_float_node", definition.node_name, float(value))
+            elif definition.kind == CameraParameterKind.ENUM:
+                await self._call_client_method("set_enum_node", definition.node_name, value)
+            else:
+                await self._call_client_method("set_bool_node", definition.node_name, bool(value))
+
+    def _capture_lock_for_current_loop(self) -> Any:
+        """Create the one native-operation lock lazily after an asyncio loop is active."""
+
+        if self._capture_lock is None:
+            self._capture_lock = asyncio.Lock()
+        return self._capture_lock
 
     async def _close_client(self) -> None:
         """Release the current client and state only after a serialized close attempt."""

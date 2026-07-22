@@ -30,15 +30,19 @@ flowchart LR
     Cache --> Snapshot[GET /frame]
     Cache --> Stream[GET /stream 多浏览器复用]
     Status[相机状态与重试] --> Api[GET /cameras 和 /status]
+    Parameters[CameraParameterAdapter 固定白名单] --> Controls[参数读取与写入接口]
+    Controls --> Camera
 ```
 
-`gripper_ai_controller.web` 是独立的 ASGI 服务图，只组装一个 `VisionAdapter`、JPEG 编码器和内存帧缓存。它不构造 `Runtime`，不读取执行目标，不加载规划/感知/审计插件，不调用安全策略，也不连接机器人或夹爪适配器。相机连接或编码失败时，服务公开标准化的 `degraded` 状态并关闭后重试；它不会把采集画面或错误写入项目存储目录。
+`gripper_ai_controller.web` 是独立的 ASGI 服务图，只组装一个 `VisionAdapter`、JPEG 编码器、内存帧缓存和可选的 `CameraParameterAdapter` 门面。它不构造 `Runtime`，不读取执行目标，不加载规划/感知/审计插件，不调用安全策略，也不连接机器人或夹爪适配器。相机连接或编码失败时，服务公开标准化的 `degraded` 状态并关闭后重试；它不会把采集画面或错误写入项目存储目录。
 
-HTTP 接口以相机 ID 建模，首版配置只允许一个相机：`/api/cameras`、`/api/cameras/{camera_id}/status`、`/api/cameras/{camera_id}/frame` 和 `/api/cameras/{camera_id}/stream`。未知相机统一返回 `404`，首帧不可用时快照返回 `503`，所有 JSON 错误均使用 `code` 和 `message`。静态构建前端由同一 FastAPI 进程提供，因此生产访问不需要跨域配置。
+HTTP 接口以相机 ID 建模，首版配置只允许一个相机：`/api/cameras`、`/api/cameras/{camera_id}/status`、`/api/cameras/{camera_id}/frame`、`/api/cameras/{camera_id}/stream` 和参数子资源。`GET /parameters` 只读设备实际能力；`PATCH /parameters/{parameter_key}` 只接受 `live` 参数；`POST /parameters/apply` 只接受需要明确保存的 `restart` 参数。未知相机统一返回 `404`，首帧不可用时快照返回 `503`，所有 JSON 错误均使用 `code` 和 `message`。状态和 HTTP 头均不含帧序号。静态构建前端由同一 FastAPI 进程提供，因此生产访问不需要跨域配置。
+
+参数写入由 `web.camera_controls_enabled` 控制，默认关闭，真实开关只能置于 `localstore/` 本机配置。服务和海康适配器使用同一采集操作锁串行化取帧、节点读取、节点写入、停止取流、恢复取流和关闭。适配器只公开固定参数白名单，不暴露厂商客户端、任意 MVS 节点、触发配置或持久化设置；写入只作用于当前设备连接会话。
 
 ## 适配器合约
 
-每个适配器拥有异步的 `startup()` 和 `shutdown()` 生命周期方法。机器人和夹爪适配器暴露 `initialize`、`get_status`、`execute` 和 `synchronize`。视觉适配器仅通过 `ImageFrame` 暴露 `capture` 和相机健康状态。`BaseAdapter` 负责幂等生命周期状态；厂商连接仅在其生命周期钩子中创建或释放。
+每个适配器拥有异步的 `startup()` 和 `shutdown()` 生命周期方法。机器人和夹爪适配器暴露 `initialize`、`get_status`、`execute` 和 `synchronize`。视觉适配器仅通过 `ImageFrame` 暴露 `capture` 和相机健康状态。`CameraParameterAdapter` 是独立的可选端口，返回规范化参数描述并接受经过白名单验证的标量更新；它不改变 `VisionAdapter` 的采集职责。`BaseAdapter` 负责幂等生命周期状态；厂商连接仅在其生命周期钩子中创建或释放。
 
 `RobotStatus` 将初始化状态与 `connected`、`powered`、`enabled` 分开表达。即使适配器已成功登录，安全策略也不会为未来机器人运动授权，除非三项设备状态都为真且机器人无故障、无急停。
 

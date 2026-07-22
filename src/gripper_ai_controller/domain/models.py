@@ -43,6 +43,21 @@ class CameraMounting(Enum):
     TOOL = "tool"
 
 
+class CameraParameterKind(Enum):
+    """Browser control shape for one normalized camera parameter."""
+
+    FLOAT = "float"
+    ENUM = "enum"
+    BOOLEAN = "boolean"
+
+
+class CameraParameterApplyMode(Enum):
+    """Whether applying a camera parameter can continue or must restart acquisition."""
+
+    LIVE = "live"
+    RESTART = "restart"
+
+
 @dataclass(frozen=True)
 class Pose3D:
     """A six-axis pose expressed in one named coordinate frame."""
@@ -93,6 +108,33 @@ class ImageFrame:
     width: Optional[int] = None
     height: Optional[int] = None
     pixel_format: Optional[str] = None
+
+
+CameraParameterValue = Union[float, str, bool]
+"""One scalar camera setting value accepted by the normalized control contract."""
+
+
+@dataclass(frozen=True)
+class CameraParameter:
+    """A whitelisted, browser-safe camera parameter and its live device constraints."""
+
+    key: str
+    kind: CameraParameterKind
+    apply_mode: CameraParameterApplyMode
+    value: CameraParameterValue
+    minimum: Optional[float] = None
+    maximum: Optional[float] = None
+    step: Optional[float] = None
+    unit: Optional[str] = None
+    options: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CameraParameterUpdateResult:
+    """The normalized parameter state returned after one atomic browser update request."""
+
+    parameters: Tuple[CameraParameter, ...]
+    restarted_acquisition: bool
 
 
 @dataclass(frozen=True)

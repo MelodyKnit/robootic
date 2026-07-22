@@ -9,24 +9,40 @@ from unittest.mock import patch
 
 from gripper_ai_controller.adapters.hikvision import HikvisionAdapter, HikvisionAdapterError
 from gripper_ai_controller.adapters.hikvision.client import (
+    MvsBoolNodeValue,
     MvsCameraClientError,
     MvsCapturedFrame,
+    MvsEnumNodeValue,
+    MvsFloatNodeValue,
     MvsUsbCameraClient,
     MvsUsbDevice,
 )
 from gripper_ai_controller.bootstrap.runtime_builder import load_runtime_config
 from gripper_ai_controller.configuration import WebPreviewSettings
+from gripper_ai_controller.domain.ports import CameraParameterError
 from gripper_ai_controller.web.service import CameraPreviewService
 
 
 class FakeMvsUsbClient:
     """Emulate the adapter-facing MVS client without importing native SDK files."""
 
-    def __init__(self, payload=None, open_error=None, capture_error=None):
+    def __init__(self, payload=None, open_error=None, capture_error=None, set_error=None):
         self.payload = payload or MvsCapturedFrame(b"\x10\x20\x30", 1, 1, "rgb8")
         self.open_error = open_error
         self.capture_error = capture_error
+        self.set_error = set_error
         self.calls = []
+        self.float_nodes = {
+            "ExposureTime": MvsFloatNodeValue(8000.0, 20.0, 100000.0),
+            "Gain": MvsFloatNodeValue(0.0, 0.0, 24.0),
+            "AcquisitionFrameRate": MvsFloatNodeValue(30.0, 1.0, 60.0),
+        }
+        self.enum_nodes = {
+            "ExposureAuto": MvsEnumNodeValue("Off", ("Off", "Continuous")),
+            "GainAuto": MvsEnumNodeValue("Off", ("Off", "Continuous")),
+            "PixelFormat": MvsEnumNodeValue("RGB8", ("RGB8", "Mono8")),
+        }
+        self.bool_nodes = {"AcquisitionFrameRateEnable": MvsBoolNodeValue(True)}
 
     def open_camera(self, camera_serial):
         self.calls.append(("open_camera", camera_serial))
@@ -41,6 +57,44 @@ class FakeMvsUsbClient:
 
     def close_camera(self):
         self.calls.append(("close_camera",))
+
+    def start_grabbing(self):
+        self.calls.append(("start_grabbing",))
+
+    def stop_grabbing(self):
+        self.calls.append(("stop_grabbing",))
+
+    def get_float_node(self, node_name):
+        self.calls.append(("get_float_node", node_name))
+        return self.float_nodes[node_name]
+
+    def set_float_node(self, node_name, value):
+        self.calls.append(("set_float_node", node_name, value))
+        if self.set_error is not None:
+            raise self.set_error
+        current = self.float_nodes[node_name]
+        self.float_nodes[node_name] = MvsFloatNodeValue(value, current.minimum, current.maximum)
+
+    def get_enum_node(self, node_name):
+        self.calls.append(("get_enum_node", node_name))
+        return self.enum_nodes[node_name]
+
+    def set_enum_node(self, node_name, value):
+        self.calls.append(("set_enum_node", node_name, value))
+        if self.set_error is not None:
+            raise self.set_error
+        current = self.enum_nodes[node_name]
+        self.enum_nodes[node_name] = MvsEnumNodeValue(value, current.options)
+
+    def get_bool_node(self, node_name):
+        self.calls.append(("get_bool_node", node_name))
+        return self.bool_nodes[node_name]
+
+    def set_bool_node(self, node_name, value):
+        self.calls.append(("set_bool_node", node_name, value))
+        if self.set_error is not None:
+            raise self.set_error
+        self.bool_nodes[node_name] = MvsBoolNodeValue(value)
 
 
 class BlockingMvsUsbClient(FakeMvsUsbClient):
@@ -198,7 +252,7 @@ class HikvisionAdapterTests(unittest.TestCase):
     def run_async(self, coroutine):
         return asyncio.run(coroutine)
 
-    def test_capture_maps_one_fake_mvs_frame_without_parameter_writes(self):
+    def test_capture_maps_one_fake_mvs_frame_without_a_frame_number_or_parameter_writes(self):
         async def scenario():
             client = FakeMvsUsbClient()
             adapter = HikvisionAdapter(
@@ -221,7 +275,7 @@ class HikvisionAdapterTests(unittest.TestCase):
             self.assertTrue(frame.healthy)
             self.assertEqual("camera-a", frame.camera_id)
             self.assertEqual("calibration-a", frame.calibration_id)
-            self.assertEqual("mvs://camera-a/frame-1", frame.frame_reference)
+            self.assertEqual("mvs://camera-a/live", frame.frame_reference)
             self.assertEqual(b"\x10\x20\x30", frame.pixel_payload)
             self.assertEqual(1, frame.width)
             self.assertEqual(1, frame.height)
@@ -233,6 +287,84 @@ class HikvisionAdapterTests(unittest.TestCase):
             )
             self.assertFalse(adapter.connected)
             self.assertFalse(adapter.healthy)
+
+        self.run_async(scenario())
+
+    def test_live_parameter_update_uses_device_range_without_restarting_acquisition(self):
+        async def scenario():
+            client = FakeMvsUsbClient()
+            adapter = HikvisionAdapter("camera-a", client_factory=lambda: client)
+
+            await adapter.startup()
+            parameters = await adapter.get_camera_parameters()
+            exposure = next(parameter for parameter in parameters if parameter.key == "exposure_time_us")
+            self.assertEqual(20.0, exposure.minimum)
+            self.assertEqual(100000.0, exposure.maximum)
+
+            client.calls.clear()
+            result = await adapter.update_camera_parameters({"exposure_time_us": 12000.0})
+            await adapter.shutdown()
+
+            self.assertFalse(result.restarted_acquisition)
+            self.assertIn(("set_float_node", "ExposureTime", 12000.0), client.calls)
+            self.assertNotIn(("stop_grabbing",), client.calls)
+            self.assertNotIn(("start_grabbing",), client.calls)
+            updated = next(parameter for parameter in result.parameters if parameter.key == "exposure_time_us")
+            self.assertEqual(12000.0, updated.value)
+
+        self.run_async(scenario())
+
+    def test_restart_parameter_stops_writes_and_resumes_acquisition_in_order(self):
+        async def scenario():
+            client = FakeMvsUsbClient()
+            adapter = HikvisionAdapter("camera-a", client_factory=lambda: client)
+
+            await adapter.startup()
+            client.calls.clear()
+            result = await adapter.update_camera_parameters({"pixel_format": "Mono8"})
+            await adapter.shutdown()
+
+            operation_names = [call[0] for call in client.calls]
+            self.assertTrue(result.restarted_acquisition)
+            self.assertLess(operation_names.index("stop_grabbing"), operation_names.index("set_enum_node"))
+            self.assertLess(operation_names.index("set_enum_node"), operation_names.index("start_grabbing"))
+            self.assertIn(("set_enum_node", "PixelFormat", "Mono8"), client.calls)
+
+        self.run_async(scenario())
+
+    def test_manual_parameter_dependencies_and_ranges_are_rejected_before_vendor_writes(self):
+        async def scenario():
+            client = FakeMvsUsbClient()
+            client.enum_nodes["ExposureAuto"] = MvsEnumNodeValue("Continuous", ("Off", "Continuous"))
+            adapter = HikvisionAdapter("camera-a", client_factory=lambda: client)
+
+            await adapter.startup()
+            client.calls.clear()
+            with self.assertRaisesRegex(CameraParameterError, "Manual exposure"):
+                await adapter.update_camera_parameters({"exposure_time_us": 12000.0})
+            self.assertNotIn(("set_float_node", "ExposureTime", 12000.0), client.calls)
+
+            client.calls.clear()
+            with self.assertRaisesRegex(CameraParameterError, "outside the device range"):
+                await adapter.update_camera_parameters({"gain_db": 100.0})
+            self.assertFalse(any(call[0].startswith("set_") for call in client.calls))
+            await adapter.shutdown()
+
+        self.run_async(scenario())
+
+    def test_restart_parameter_failure_still_attempts_to_resume_acquisition(self):
+        async def scenario():
+            client = FakeMvsUsbClient(set_error=RuntimeError("write failed"))
+            adapter = HikvisionAdapter("camera-a", client_factory=lambda: client)
+
+            await adapter.startup()
+            client.calls.clear()
+            with self.assertRaisesRegex(HikvisionAdapterError, "Unable to apply"):
+                await adapter.update_camera_parameters({"pixel_format": "Mono8"})
+            operation_names = [call[0] for call in client.calls]
+            self.assertLess(operation_names.index("stop_grabbing"), operation_names.index("set_enum_node"))
+            self.assertLess(operation_names.index("set_enum_node"), operation_names.index("start_grabbing"))
+            await adapter.shutdown()
 
         self.run_async(scenario())
 

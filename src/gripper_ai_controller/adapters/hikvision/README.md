@@ -1,11 +1,13 @@
 # 海康 USB3 Vision 适配器
 
-本包通过项目内本机复制的 MVS Python 封装和 Windows x64 运行库实现 `VisionAdapter`。它只负责枚举、打开、获取原始帧和释放相机资源；目标检测、分割、姿态估计、抓取规划和相机参数标定均不属于本包。
+本包通过项目内本机复制的 MVS Python 封装和 Windows x64 运行库实现 `VisionAdapter` 与可选的 `CameraParameterAdapter`。它负责枚举、打开、获取原始帧、释放相机资源，以及受固定白名单约束的运行时参数读取与写入；目标检测、分割、姿态估计、抓取规划和相机标定均不属于本包。
 
 ## 生命周期和安全边界
 
-- `startup()`：枚举并打开一个 MVS USB3 Vision 相机，不启动取流，不修改触发、曝光、增益、帧率或持久化参数。
+- `startup()`：枚举并打开一个 MVS USB3 Vision 相机，不启动取流，不修改任何参数。
 - `capture()`：按当前设备已有配置启动采集并复制一帧原始像素数据；不会保存文件，也不会运行感知模型。`ImageFrame` 会包含宽度、高度和规范化像素格式：`Mono8` 保留为 `mono8`，`RGB8` 为 `rgb8`，其他受支持彩色格式在释放 MVS 缓冲区前转换为 `rgb8`。成功构造帧后会按注册顺序调用该实例的 `on_frame()` 异步观察者。
+- `get_camera_parameters()`：在相机已打开时读取实际可用的固定参数白名单。浮点范围和枚举选项均来自设备；当前型号不支持、不可读或受访问条件限制的节点不会出现在结果中。
+- `update_camera_parameters()`：只允许自动曝光 `ExposureAuto`、曝光时间 `ExposureTime`、自动增益 `GainAuto`、增益 `Gain`、帧率开关 `AcquisitionFrameRateEnable`、帧率 `AcquisitionFrameRate` 和像素格式 `PixelFormat`。曝光、增益和帧率为实时参数；像素格式需停止取流后应用，再自动恢复取流。该方法不会接受任意节点名、触发模式或持久化用户设置。
 - `shutdown()`：先等待正在执行的原生取帧返回，再按停止取流、关闭设备、销毁句柄、反初始化 SDK 的顺序释放资源。关闭请求最多受当前 `frame_timeout_ms` 与底层 SDK 返回时间影响，不能并发释放正在被 MVS 调用使用的句柄。
 - 未配置 `camera_serial` 时，只有枚举到一台 MVS USB 相机才允许打开；存在多台设备时必须从本机私有配置指定序列号。
 
@@ -13,7 +15,9 @@
 
 受版本控制的 [配置模板](../../../../../configs/hikvision-usb.example.json) 不包含真实序列号或标定数据。将模板复制到 `localstore/` 后填入相机序列号和真实标定标识，再通过显式 `--config-file` 传入运行时。
 
-`camera_id` 与 `calibration_id` 分别用于帧标识和标定关联。它们不改变设备本身的 UserID、曝光、触发或其他相机参数。
+`camera_id` 与 `calibration_id` 分别用于帧标识和标定关联。它们不改变设备本身的 UserID、曝光、触发或其他相机参数。网页参数写入还必须由 `web.camera_controls_enabled` 在本机私有配置中显式开启；适配器本身不读取配置开关，网页服务负责该访问许可。
+
+参数写入只影响当前连接会话。实现不会调用 `MV_CC_FeatureSave`、`UserSetSave` 或其他持久化命令。取帧、读取、写入、停止取流、恢复取流和关闭共用同一异步锁，避免 MVS 句柄被并发调用。
 
 ## SDK 文件
 
@@ -28,6 +32,6 @@
 conda run -n robotic python -m unittest tests.test_hikvision_adapter -v
 ```
 
-单元测试使用假客户端，不打开真实相机。实际硬件检查仅应执行 `startup()` 后立即 `shutdown()`；首次取帧需要由操作者明确发起。
+单元测试使用假客户端，不打开真实相机。实际硬件检查应先读取 `get_camera_parameters()` 的实际范围和枚举；写入验收只应将当前值写回，确认实时参数或停止/恢复采集链路，不应使用未经确认的新曝光、增益或像素格式值。首次取帧和任何参数写入都需要由操作者明确发起。
 
 帧观察者的通用注册方式、错误语义和多相机边界见上级 [适配器说明](../README.md#帧观察者)。

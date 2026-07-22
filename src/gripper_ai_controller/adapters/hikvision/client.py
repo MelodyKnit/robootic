@@ -2,7 +2,7 @@
 
 import importlib
 import os
-from ctypes import POINTER, byref, c_ubyte, cast, memset, sizeof, string_at
+from ctypes import POINTER, byref, c_bool, c_ubyte, cast, memset, sizeof, string_at
 from dataclasses import dataclass
 from typing import Any, List, Optional, Sequence
 
@@ -30,12 +30,37 @@ class MvsCapturedFrame:
     pixel_format: str
 
 
+@dataclass(frozen=True)
+class MvsFloatNodeValue:
+    """A vendor float node value with the device-reported writable range."""
+
+    value: float
+    minimum: float
+    maximum: float
+
+
+@dataclass(frozen=True)
+class MvsEnumNodeValue:
+    """A vendor enum node represented through stable symbolic option strings."""
+
+    value: str
+    options: Sequence[str]
+
+
+@dataclass(frozen=True)
+class MvsBoolNodeValue:
+    """A vendor boolean node value normalized without exposing ctypes values."""
+
+    value: bool
+
+
 class MvsUsbCameraClient:
     """Wrap the blocking MVS SDK lifecycle and frame-copy operations.
 
-    The client never configures trigger mode, exposure, gain, frame rate, or persistence.
-    It only enumerates, opens, starts acquisition on demand, copies one frame, and releases
-    all SDK resources in the reverse lifecycle order.
+    The client owns vendor node access but exposes no arbitrary node names to callers outside
+    the Hikvision adapter. It enumerates, opens, starts/stops acquisition, copies frames, and
+    reads or writes only adapter-whitelisted parameter nodes before releasing all SDK resources
+    in the reverse lifecycle order.
     """
 
     def __init__(self) -> None:
@@ -119,11 +144,8 @@ class MvsUsbCameraClient:
         while the MVS-owned source buffer remains valid.
         """
 
-        if not self._opened or self._camera is None:
-            raise MvsCameraClientError("MVS USB camera must be open before frame acquisition.")
-        if not self._grabbing:
-            self._require_success("MV_CC_StartGrabbing", self._camera.MV_CC_StartGrabbing())
-            self._grabbing = True
+        self._require_open_camera()
+        self.start_grabbing()
 
         frame = self._sdk.MV_FRAME_OUT()
         memset(byref(frame), 0, sizeof(frame))
@@ -158,6 +180,103 @@ class MvsUsbCameraClient:
         finally:
             if frame.pBufAddr:
                 self._require_success("MV_CC_FreeImageBuffer", self._camera.MV_CC_FreeImageBuffer(frame))
+
+    def start_grabbing(self) -> None:
+        """Start the current device acquisition only when it is not already running."""
+
+        self._require_open_camera()
+        if self._grabbing:
+            return
+        self._require_success("MV_CC_StartGrabbing", self._camera.MV_CC_StartGrabbing())
+        self._grabbing = True
+
+    def stop_grabbing(self) -> None:
+        """Stop acquisition before a node that requires a stopped stream is updated."""
+
+        self._require_open_camera()
+        if not self._grabbing:
+            return
+        self._require_success("MV_CC_StopGrabbing", self._camera.MV_CC_StopGrabbing())
+        self._grabbing = False
+
+    def get_float_node(self, node_name: str) -> MvsFloatNodeValue:
+        """Read one MVS float node together with its device-reported writable range."""
+
+        self._require_open_camera()
+        value = self._sdk.MVCC_FLOATVALUE()
+        memset(byref(value), 0, sizeof(value))
+        self._require_success(
+            "MV_CC_GetFloatValue({0})".format(node_name),
+            self._camera.MV_CC_GetFloatValue(node_name, value),
+        )
+        return MvsFloatNodeValue(float(value.fCurValue), float(value.fMin), float(value.fMax))
+
+    def set_float_node(self, node_name: str, value: float) -> None:
+        """Write one validated MVS float node without persisting it to camera storage."""
+
+        self._require_open_camera()
+        self._require_success(
+            "MV_CC_SetFloatValue({0})".format(node_name),
+            self._camera.MV_CC_SetFloatValue(node_name, value),
+        )
+
+    def get_enum_node(self, node_name: str) -> MvsEnumNodeValue:
+        """Read one MVS enum node and resolve its supported values to symbolic names."""
+
+        self._require_open_camera()
+        value = self._sdk.MVCC_ENUMVALUE_EX()
+        memset(byref(value), 0, sizeof(value))
+        self._require_success(
+            "MV_CC_GetEnumValueEx({0})".format(node_name),
+            self._camera.MV_CC_GetEnumValueEx(node_name, value),
+        )
+        options = []  # type: List[str]
+        current_value = int(value.nCurValue)
+        current_symbolic = None  # type: Optional[str]
+        for index in range(int(value.nSupportedNum)):
+            entry = self._sdk.MVCC_ENUMENTRY()
+            memset(byref(entry), 0, sizeof(entry))
+            entry.nValue = value.nSupportValue[index]
+            self._require_success(
+                "MV_CC_GetEnumEntrySymbolic({0})".format(node_name),
+                self._camera.MV_CC_GetEnumEntrySymbolic(node_name, entry),
+            )
+            symbolic = self.decode_string(entry.chSymbolic)
+            options.append(symbolic)
+            if int(entry.nValue) == current_value:
+                current_symbolic = symbolic
+        if current_symbolic is None:
+            raise MvsCameraClientError("MVS enum node {0} has no symbolic current value.".format(node_name))
+        return MvsEnumNodeValue(current_symbolic, tuple(options))
+
+    def set_enum_node(self, node_name: str, value: str) -> None:
+        """Write one validated symbolic MVS enum value without persisting camera settings."""
+
+        self._require_open_camera()
+        self._require_success(
+            "MV_CC_SetEnumValueByString({0})".format(node_name),
+            self._camera.MV_CC_SetEnumValueByString(node_name, value),
+        )
+
+    def get_bool_node(self, node_name: str) -> MvsBoolNodeValue:
+        """Read one MVS boolean node through the vendor's ctypes API."""
+
+        self._require_open_camera()
+        value = c_bool()
+        self._require_success(
+            "MV_CC_GetBoolValue({0})".format(node_name),
+            self._camera.MV_CC_GetBoolValue(node_name, value),
+        )
+        return MvsBoolNodeValue(bool(value.value))
+
+    def set_bool_node(self, node_name: str, value: bool) -> None:
+        """Write one validated MVS boolean node without using a persistent user-set command."""
+
+        self._require_open_camera()
+        self._require_success(
+            "MV_CC_SetBoolValue({0})".format(node_name),
+            self._camera.MV_CC_SetBoolValue(node_name, bool(value)),
+        )
 
     def _convert_to_rgb8(
         self,
@@ -258,6 +377,12 @@ class MvsUsbCameraClient:
 
         if self._sdk is None:
             raise MvsCameraClientError("The MVS SDK has not been loaded.")
+
+    def _require_open_camera(self) -> None:
+        """Raise when a vendor node operation is requested before a successful open."""
+
+        if not self._opened or self._camera is None:
+            raise MvsCameraClientError("MVS USB camera must be open before this operation.")
 
     @staticmethod
     def _require_success(operation: str, result: int) -> None:

@@ -18,10 +18,12 @@ class SafetyLimits:
 
 @dataclass(frozen=True)
 class WebPreviewSettings:
-    """Validated settings for the read-only camera preview server.
+    """Validated settings for the browser camera preview and parameter-control server.
 
     The values originate in a versioned JSON configuration file or explicit CLI
-    overrides. They never expose camera controls, robot controls, or persistence paths.
+    overrides. Camera parameter writes remain disabled unless a local configuration
+    explicitly enables the fixed adapter whitelist. These settings never enable robot
+    or gripper controls, and they do not define persistence paths.
     """
 
     bind_host: str = "0.0.0.0"
@@ -30,3 +32,4 @@ class WebPreviewSettings:
     stream_fps: int = 10
     jpeg_quality: int = 80
     capture_retry_seconds: float = 1.0
+    camera_controls_enabled: bool = False

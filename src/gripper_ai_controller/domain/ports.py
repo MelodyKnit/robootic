@@ -1,10 +1,13 @@
 """Lifecycle-enabled ports that isolate core logic from SDKs and simulators."""
 
 from abc import ABC, abstractmethod
-from typing import Awaitable, Callable, Optional, Union
+from typing import Awaitable, Callable, Mapping, Optional, Tuple, Union
 
 from gripper_ai_controller.domain.models import (
     CommandEnvelope,
+    CameraParameter,
+    CameraParameterUpdateResult,
+    CameraParameterValue,
     ComponentManifest,
     GripperCommand,
     GripperStatus,
@@ -92,3 +95,25 @@ class VisionAdapter(LifecycleComponent):
     @abstractmethod
     async def capture(self) -> ImageFrame:
         """Capture one frame reference and its metadata."""
+
+
+class CameraParameterError(ValueError):
+    """Report an invalid or unavailable normalized camera parameter operation."""
+
+
+class CameraParameterAdapter(ABC):
+    """Optional vision capability for controlled camera parameter inspection and updates.
+
+    Implementations expose only a fixed, normalized parameter whitelist. They never
+    hand the browser a vendor SDK client or accept arbitrary SDK node names.
+    """
+
+    @abstractmethod
+    async def get_camera_parameters(self) -> Tuple[CameraParameter, ...]:
+        """Return currently supported parameter descriptors and live device values."""
+
+    @abstractmethod
+    async def update_camera_parameters(
+        self, updates: Mapping[str, CameraParameterValue]
+    ) -> CameraParameterUpdateResult:
+        """Validate and apply one normalized update batch, restarting acquisition when needed."""

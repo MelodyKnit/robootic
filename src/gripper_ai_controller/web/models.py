@@ -8,7 +8,6 @@ from typing import Optional
 class EncodedFrame:
     """One browser-ready JPEG held only in the bounded in-memory frame hub."""
 
-    sequence: int
     captured_at: float
     jpeg_payload: bytes
 
@@ -23,10 +22,9 @@ class CameraPreviewError:
 
 @dataclass(frozen=True)
 class CameraPreviewStatus:
-    """The read-only state of one configured camera preview pipeline."""
+    """The current state of one configured camera preview pipeline."""
 
     camera_id: str
     state: str
     latest_frame_at: Optional[float]
-    frame_sequence: Optional[int]
     error: Optional[CameraPreviewError]
