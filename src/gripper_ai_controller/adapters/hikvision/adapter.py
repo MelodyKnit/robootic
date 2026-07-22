@@ -5,7 +5,7 @@ import time
 from typing import Any, Callable, Optional
 
 from gripper_ai_controller.adapters.base import FrameDispatchingVisionAdapter
-from gripper_ai_controller.adapters.hikvision.client import MvsUsbCameraClient
+from gripper_ai_controller.adapters.hikvision.client import MvsCapturedFrame, MvsUsbCameraClient
 from gripper_ai_controller.domain.models import ComponentManifest, ImageFrame
 
 
@@ -90,28 +90,37 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter):
         self._healthy = True
 
     async def on_shutdown(self) -> None:
-        """Close the MVS camera and release SDK resources without persisting camera settings."""
+        """Close the MVS camera after any in-flight native capture has returned safely.
 
-        try:
-            if self._client is not None:
-                await self._call_client_method("close_camera")
-        finally:
-            self._client = None
-            self._connected = False
-            self._healthy = False
+        ``capture`` invokes the blocking MVS SDK in an executor thread. Sharing its
+        lock here prevents a concurrent shutdown from destroying the SDK handle while
+        that thread is still using the handle or its MVS-managed image buffer.
+        """
+
+        if self._capture_lock is None:
+            await self._close_client()
+            return
+        async with self._capture_lock:
+            await self._close_client()
 
     async def capture(self) -> ImageFrame:
-        """Copy one raw frame from the active camera without running perception or saving files."""
+        """Map one normalized MVS frame without running perception or saving files."""
 
         self.ensure_started()
         if self._capture_lock is None:
             self._capture_lock = asyncio.Lock()
         async with self._capture_lock:
             try:
-                pixel_payload = await self._call_client_method("capture_frame", self.frame_timeout_ms)
+                captured_frame = await self._call_client_method("capture_frame", self.frame_timeout_ms)
+            except asyncio.CancelledError:
+                # Let the executor-backed call complete before BaseAdapter may close the SDK handle.
+                raise
             except Exception as error:
                 self._healthy = False
                 raise HikvisionAdapterError("Unable to acquire a frame from the Hikvision USB camera.") from error
+            if not isinstance(captured_frame, MvsCapturedFrame):
+                self._healthy = False
+                raise HikvisionAdapterError("The Hikvision MVS client returned an invalid normalized frame.")
             self._frame_sequence += 1
             self._healthy = True
             frame = ImageFrame(
@@ -120,7 +129,10 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter):
                 frame_reference="mvs://{0}/frame-{1}".format(self.camera_id, self._frame_sequence),
                 calibration_id=self.calibration_id,
                 healthy=True,
-                pixel_payload=pixel_payload,
+                pixel_payload=captured_frame.pixel_payload,
+                width=captured_frame.width,
+                height=captured_frame.height,
+                pixel_format=captured_frame.pixel_format,
             )
             await self.emit_frame(frame)
             return frame
@@ -135,4 +147,25 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter):
         except AttributeError as error:
             raise HikvisionAdapterError("The Hikvision MVS client lacks {0}.".format(method_name)) from error
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, method, *arguments)
+        future = loop.run_in_executor(None, method, *arguments)
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            # Cancellation of the coroutine cannot stop a native SDK thread. Wait for
+            # it to finish before allowing lifecycle shutdown to release the handle.
+            try:
+                await asyncio.shield(future)
+            except Exception:
+                pass
+            raise
+
+    async def _close_client(self) -> None:
+        """Release the current client and state only after a serialized close attempt."""
+
+        try:
+            if self._client is not None:
+                await self._call_client_method("close_camera")
+        finally:
+            self._client = None
+            self._connected = False
+            self._healthy = False

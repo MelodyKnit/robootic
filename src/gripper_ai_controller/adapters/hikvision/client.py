@@ -2,7 +2,7 @@
 
 import importlib
 import os
-from ctypes import POINTER, byref, cast, memset, sizeof, string_at
+from ctypes import POINTER, byref, c_ubyte, cast, memset, sizeof, string_at
 from dataclasses import dataclass
 from typing import Any, List, Optional, Sequence
 
@@ -18,6 +18,16 @@ class MvsUsbDevice:
     serial_number: str
     model_name: str
     vendor_device_info: Any
+
+
+@dataclass(frozen=True)
+class MvsCapturedFrame:
+    """One normalized MVS frame that does not expose ctypes or vendor enum values."""
+
+    pixel_payload: bytes
+    width: int
+    height: int
+    pixel_format: str
 
 
 class MvsUsbCameraClient:
@@ -100,8 +110,14 @@ class MvsUsbCameraClient:
             )
         return devices[0]
 
-    def capture_frame(self, timeout_ms: int) -> bytes:
-        """Start acquisition when needed, copy one frame, and always release the SDK buffer."""
+    def capture_frame(self, timeout_ms: int) -> MvsCapturedFrame:
+        """Acquire and normalize one frame before always releasing the SDK buffer.
+
+        Mono8 is retained as a generic ``mono8`` payload so a camera that exposes only
+        mono output does not depend on undocumented SDK conversion behavior. RGB8 is
+        copied directly; Bayer and other supported color formats are converted to RGB8
+        while the MVS-owned source buffer remains valid.
+        """
 
         if not self._opened or self._camera is None:
             raise MvsCameraClientError("MVS USB camera must be open before frame acquisition.")
@@ -113,13 +129,65 @@ class MvsUsbCameraClient:
         memset(byref(frame), 0, sizeof(frame))
         self._require_success("MV_CC_GetImageBuffer", self._camera.MV_CC_GetImageBuffer(frame, timeout_ms))
         try:
-            frame_length = int(frame.stFrameInfo.nFrameLen)
+            frame_info = frame.stFrameInfo
+            width = int(getattr(frame_info, "nExtendWidth", 0) or frame_info.nWidth)
+            height = int(getattr(frame_info, "nExtendHeight", 0) or frame_info.nHeight)
+            frame_length = int(frame_info.nFrameLen)
+            extended_length = int(getattr(frame_info, "nFrameLenEx", 0))
             if not frame.pBufAddr or frame_length <= 0:
                 raise MvsCameraClientError("MVS returned an empty image buffer.")
-            return string_at(frame.pBufAddr, frame_length)
+            if width <= 0 or height <= 0:
+                raise MvsCameraClientError("MVS returned invalid image dimensions.")
+            if extended_length > 0xFFFFFFFF:
+                raise MvsCameraClientError("MVS returned a frame too large for pixel conversion.")
+            if extended_length not in (0, frame_length):
+                raise MvsCameraClientError("MVS returned inconsistent frame-length metadata.")
+
+            source_pixel_type = int(frame_info.enPixelType)
+            if source_pixel_type == self._sdk.PixelType_Gvsp_Mono8:
+                expected_length = width * height
+                if frame_length != expected_length:
+                    raise MvsCameraClientError("MVS Mono8 frame length does not match its dimensions.")
+                return MvsCapturedFrame(string_at(frame.pBufAddr, frame_length), width, height, "mono8")
+            if source_pixel_type == self._sdk.PixelType_Gvsp_RGB8_Packed:
+                expected_length = width * height * 3
+                if frame_length != expected_length:
+                    raise MvsCameraClientError("MVS RGB8 frame length does not match its dimensions.")
+                return MvsCapturedFrame(string_at(frame.pBufAddr, frame_length), width, height, "rgb8")
+            return self._convert_to_rgb8(frame, width, height, source_pixel_type, frame_length)
         finally:
             if frame.pBufAddr:
                 self._require_success("MV_CC_FreeImageBuffer", self._camera.MV_CC_FreeImageBuffer(frame))
+
+    def _convert_to_rgb8(
+        self,
+        frame: Any,
+        width: int,
+        height: int,
+        source_pixel_type: int,
+        source_length: int,
+    ) -> MvsCapturedFrame:
+        """Use MVS conversion before buffer release for supported non-RGB pixel formats."""
+
+        destination_size = width * height * 3
+        if destination_size <= 0 or destination_size > 0xFFFFFFFF:
+            raise MvsCameraClientError("MVS RGB conversion output size is unsupported.")
+        destination = (c_ubyte * destination_size)()
+        conversion = self._sdk.MV_CC_PIXEL_CONVERT_PARAM_EX()
+        memset(byref(conversion), 0, sizeof(conversion))
+        conversion.nWidth = width
+        conversion.nHeight = height
+        conversion.enSrcPixelType = source_pixel_type
+        conversion.pSrcData = cast(frame.pBufAddr, POINTER(c_ubyte))
+        conversion.nSrcDataLen = source_length
+        conversion.enDstPixelType = self._sdk.PixelType_Gvsp_RGB8_Packed
+        conversion.pDstBuffer = cast(destination, POINTER(c_ubyte))
+        conversion.nDstBufferSize = destination_size
+        self._require_success("MV_CC_ConvertPixelTypeEx", self._camera.MV_CC_ConvertPixelTypeEx(conversion))
+        destination_length = int(conversion.nDstLen)
+        if destination_length != destination_size:
+            raise MvsCameraClientError("MVS RGB conversion returned an unexpected output length.")
+        return MvsCapturedFrame(bytes(destination[:destination_length]), width, height, "rgb8")
 
     def close_camera(self) -> None:
         """Release acquisition, device, handle, and SDK resources in reverse order."""

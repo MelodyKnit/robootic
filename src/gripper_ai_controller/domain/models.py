@@ -77,7 +77,12 @@ class SensorReading:
 
 @dataclass(frozen=True)
 class ImageFrame:
-    """A camera frame reference and the metadata required to interpret it."""
+    """A camera frame and the metadata required to interpret its pixel payload.
+
+    ``pixel_format`` is a normalized identifier such as ``rgb8`` or ``mono8``.
+    Pixel bytes remain acquisition data, not a persisted image file or a perception
+    result. Width and height are required whenever a payload is supplied for rendering.
+    """
 
     camera_id: str
     captured_at: float
@@ -85,6 +90,9 @@ class ImageFrame:
     calibration_id: Optional[str]
     healthy: bool
     pixel_payload: Optional[bytes] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    pixel_format: Optional[str] = None
 
 
 @dataclass(frozen=True)

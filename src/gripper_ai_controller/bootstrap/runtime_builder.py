@@ -30,44 +30,44 @@ OBSERVER_PLUGINS = {"audit": AuditPlugin}
 def load_runtime_config(config_file: str) -> RuntimeConfig:
     """Load JSON chosen by the caller and construct a validated development graph."""
 
-    payload = _load_json(config_file)
+    payload = load_json_config(config_file)
     mode = _required_enum(payload, "runtime_mode", RuntimeMode)
     if mode == RuntimeMode.PRODUCTION:
         raise RuntimeError(
             "Production configuration is fail-closed until real project-local adapters are registered."
         )
-    camera = _required_mapping(payload, "camera")
+    camera = required_mapping(payload, "camera")
     mounting = _required_enum(camera, "mounting", CameraMounting)
     parent_frame = "robot_base" if mounting == CameraMounting.FIXED else "tool0"
     calibration = CameraCalibration(
-        calibration_id=_required_string(camera, "calibration_id"),
-        camera_id=_required_string(camera, "camera_id"),
+        calibration_id=required_string(camera, "calibration_id"),
+        camera_id=required_string(camera, "camera_id"),
         mounting=mounting,
         parent_frame=parent_frame,
         camera_to_parent=Pose3D(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, parent_frame),
     )
-    components = _required_mapping(payload, "components")
-    plugins = _required_mapping(components, "plugins")
+    components = required_mapping(payload, "components")
+    plugins = required_mapping(components, "plugins")
     safety = payload.get("safety", {})
     if not isinstance(safety, dict):
         raise ValueError("safety must be a JSON object when present.")
     return RuntimeConfig(
         mode=mode,
-        vision=_create(
+        vision=create_component(
             VISION_ADAPTERS,
-            _required_string(components, "vision"),
+            required_string(components, "vision"),
             "vision adapter",
-            _optional_mapping(components, "vision_adapter_settings"),
+            optional_mapping(components, "vision_adapter_settings"),
         ),
         calibration=calibration,
-        perception_plugin=_create(
-            PERCEPTION_PLUGINS, _required_string(plugins, "perception"), "perception plugin"
+        perception_plugin=create_component(
+            PERCEPTION_PLUGINS, required_string(plugins, "perception"), "perception plugin"
         ),
         planner_plugins=tuple(
-            _create(PLANNER_PLUGINS, name, "planner plugin") for name in _required_list(plugins, "planners")
+            create_component(PLANNER_PLUGINS, name, "planner plugin") for name in _required_list(plugins, "planners")
         ),
         observer_plugins=tuple(
-            _create(OBSERVER_PLUGINS, name, "observer plugin") for name in _required_list(plugins, "observers")
+            create_component(OBSERVER_PLUGINS, name, "observer plugin") for name in _required_list(plugins, "observers")
         ),
         targets=tuple(_build_target(target) for target in _required_list(payload, "targets")),
         safety_policy=SafetyPolicy(_build_safety_limits(safety)),
@@ -91,15 +91,15 @@ def _build_target(settings: Any) -> ExecutionTarget:
     if not isinstance(settings, dict):
         raise ValueError("Every targets entry must be a JSON object.")
     return ExecutionTarget(
-        _required_string(settings, "name"),
+        required_string(settings, "name"),
         _required_enum(settings, "role", TargetRole),
-        _create(
+        create_component(
             ROBOT_ADAPTERS,
-            _required_string(settings, "robot_adapter"),
+            required_string(settings, "robot_adapter"),
             "robot adapter",
-            _optional_mapping(settings, "robot_adapter_settings"),
+            optional_mapping(settings, "robot_adapter_settings"),
         ),
-        _create(GRIPPER_ADAPTERS, _required_string(settings, "gripper_adapter"), "gripper adapter"),
+        create_component(GRIPPER_ADAPTERS, required_string(settings, "gripper_adapter"), "gripper adapter"),
     )
 
 
@@ -121,7 +121,7 @@ def _build_safety_limits(settings: Dict[str, Any]) -> SafetyLimits:
     return SafetyLimits(**settings)
 
 
-def _load_json(config_file: str) -> Dict[str, Any]:
+def load_json_config(config_file: str) -> Dict[str, Any]:
     """Read a JSON object while reporting missing files and malformed JSON clearly."""
 
     path = Path(config_file)
@@ -139,7 +139,7 @@ def _load_json(config_file: str) -> Dict[str, Any]:
     return payload
 
 
-def _create(
+def create_component(
     factories: Dict[str, Any], name: str, component_type: str, settings: Dict[str, Any] = None
 ) -> Any:
     """Instantiate one known safe component by its configured identifier."""
@@ -151,7 +151,7 @@ def _create(
     return factory(**(settings or {}))
 
 
-def _optional_mapping(payload: Dict[str, Any], key: str) -> Dict[str, Any]:
+def optional_mapping(payload: Dict[str, Any], key: str) -> Dict[str, Any]:
     """Return an optional object field, defaulting to a fresh empty settings mapping."""
 
     value = payload.get(key, {})
@@ -160,7 +160,7 @@ def _optional_mapping(payload: Dict[str, Any], key: str) -> Dict[str, Any]:
     return value
 
 
-def _required_mapping(payload: Dict[str, Any], key: str) -> Dict[str, Any]:
+def required_mapping(payload: Dict[str, Any], key: str) -> Dict[str, Any]:
     """Return a required object field or raise a configuration-specific error."""
 
     value = payload.get(key)
@@ -178,7 +178,7 @@ def _required_list(payload: Dict[str, Any], key: str) -> Iterable[Any]:
     return value
 
 
-def _required_string(payload: Dict[str, Any], key: str) -> str:
+def required_string(payload: Dict[str, Any], key: str) -> str:
     """Return a required non-empty string identifier from one JSON object."""
 
     value = payload.get(key)
@@ -190,7 +190,7 @@ def _required_string(payload: Dict[str, Any], key: str) -> str:
 def _required_enum(payload: Dict[str, Any], key: str, enum_type: Any) -> Any:
     """Resolve a JSON string into a project enum and report allowed values clearly."""
 
-    value = _required_string(payload, key)
+    value = required_string(payload, key)
     try:
         return enum_type(value)
     except ValueError:

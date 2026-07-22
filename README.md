@@ -1,6 +1,6 @@
 # 夹爪 AI 控制器
 
-本项目是一个基于 Python 3.7、无硬件依赖的视觉引导机器人及夹爪工作站基础框架。其运行时采用模块化的分离架构：小型核心负责生命周期、类型化事件、安全授权和指令调度；适配器和插件均为可独立更新的项目内模块。
+本项目是一个基于 Python 3.7 的视觉引导机器人及夹爪工作站基础框架。其运行时采用模块化的分离架构：小型核心负责生命周期、类型化事件、安全授权和指令调度；适配器和插件均为可独立更新的项目内模块。
 
 默认开发图是安全自洽的：使用内存中的机器人、夹爪、镜像、相机、规划和感知组件，从不导入厂商 SDK、打开端口、采集真实图像或控制物理设备。
 
@@ -10,6 +10,8 @@
 - Python：`>=3.7,<3.8`，64 位
 - 包管理器：Poetry
 - 仿真通信依赖：`pyzmq==25.1.2`、`cbor==1.0.0`
+- 相机预览运行依赖：`FastAPI==0.99.1`、`uvicorn==0.22.0`、`Pillow==9.5.0`
+- 前端构建环境：Node.js 20 或更高版本、pnpm 10
 
 Python 版本限制有意比 `^3.7` 更严格：本机复制的 JAKA `jkrc` 扩展针对 Python 3.7 64 位编译。
 
@@ -31,6 +33,24 @@ python scripts/check_submission_paths.py
 `[project.dependencies]` 是标准依赖声明；`[tool.poetry.dependencies]` 保留相同版本，供 Python 3.7 兼容的 Poetry 1.8.5 运行器使用。由于 Python 3.7 不兼容 Poetry 2.3.4 的解释器探测依赖，Poetry 1.8.5 运行器应将其 `packaging` 固定为 23.2、`virtualenv` 固定为 20.26.6。项目依赖仍必须通过 Poetry 安装，不得使用裸 `pip` 写入 `robotic` 环境。
 
 `reload` 仅在开发模式下可用。生产配置在有明确的本地硬件适配器实现之前，刻意保持"故障关闭"状态。
+
+## 相机网页预览
+
+网页预览是独立的只读服务，不会创建 `Runtime`、执行目标、安全策略、JAKA 连接或夹爪连接。它只启动配置中的一个 `VisionAdapter`，以单一采集循环把最新帧保留在内存中，并将同一 JPEG 帧复用给快照和多个 MJPEG 浏览器连接。
+
+先构建 Vue 前端，再通过显式 JSON 配置启动服务：
+
+```powershell
+pnpm --dir src/web install
+pnpm --dir src/web build
+poetry run gripper-ai-controller web --config-file configs/development.json
+```
+
+默认服务绑定 `0.0.0.0:8000`，浏览器访问 `http://本机地址:8000/`。可使用 `--host`、`--port` 和 `--frontend-dist-dir` 覆盖对应配置值；它们均不会写回配置文件。开发前端可在 `src/web/` 中执行 `pnpm dev`，Vite 会将 `/api` 代理到本机 `8000` 端口。
+
+接口仅提供 `GET /api/cameras`、`GET /api/cameras/{camera_id}/status`、`GET /api/cameras/{camera_id}/frame` 和 `GET /api/cameras/{camera_id}/stream`。局域网服务没有认证、TLS、来源限制或访问审计，只能部署于受信任网络，不能直接暴露到互联网。
+
+使用实物海康 USB 相机时，先将 `configs/hikvision-usb.example.json` 复制到 `localstore/`，填写本机标定标识；只有系统枚举到一台相机时才可省略序列号。该配置不应提交。详细接口、重试和图像格式规则见 [相机网页预览后端说明](src/gripper_ai_controller/web/README.md)。
 
 ## 提交前路径检查
 

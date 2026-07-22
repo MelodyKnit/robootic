@@ -8,6 +8,9 @@ requires-python = ">=3.7,<3.8"
 dependencies = [
     "pyzmq==25.1.2",
     "cbor==1.0.0",
+    "fastapi==0.99.1",
+    "uvicorn==0.22.0",
+    "Pillow==9.5.0",
 ]
 
 [project.scripts]
@@ -31,6 +34,13 @@ exclude = [
 python = ">=3.7,<3.8"
 pyzmq = "25.1.2"
 cbor = "1.0.0"
+fastapi = "0.99.1"
+uvicorn = "0.22.0"
+Pillow = "9.5.0"
+
+[tool.poetry.group.dev.dependencies]
+# FastAPI's TestClient uses this only in the offline HTTP contract test suite.
+httpx = "0.24.1"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

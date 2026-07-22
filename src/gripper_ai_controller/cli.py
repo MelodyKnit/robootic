@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from dataclasses import replace
 
 from gripper_ai_controller.bootstrap.runtime_builder import build_runtime
 
@@ -34,6 +35,30 @@ async def _reload(args: argparse.Namespace) -> None:
         await runtime.shutdown()
 
 
+def _web(args: argparse.Namespace) -> None:
+    """Run the read-only FastAPI camera preview without constructing the runtime."""
+
+    import uvicorn
+
+    from gripper_ai_controller.bootstrap.preview_builder import load_vision_preview_config, validate_web_settings
+    from gripper_ai_controller.web import create_web_app
+
+    preview_config = load_vision_preview_config(args.config_file)
+    settings = preview_config.settings
+    if args.host is not None:
+        settings = replace(settings, bind_host=args.host)
+    if args.port is not None:
+        if args.port < 1 or args.port > 65535:
+            raise ValueError("--port must be an integer from 1 to 65535.")
+        settings = replace(settings, port=args.port)
+    if args.frontend_dist_dir is not None:
+        settings = replace(settings, frontend_dist_dir=args.frontend_dist_dir)
+    settings = validate_web_settings(settings)
+    preview_config.settings = settings
+    application = create_web_app(preview_config, settings.frontend_dist_dir)
+    uvicorn.run(application, host=settings.bind_host, port=settings.port)
+
+
 def main() -> None:
     """Parse commands without creating a physical device connection."""
 
@@ -45,6 +70,11 @@ def main() -> None:
     reload_command = subparsers.add_parser("reload", help="Explicitly reload development modules.")
     reload_command.add_argument("--config-file", default="configs/development.json")
     reload_command.add_argument("--module", action="append")
+    web = subparsers.add_parser("web", help="Run the read-only camera preview web service.")
+    web.add_argument("--config-file", default="configs/development.json")
+    web.add_argument("--host")
+    web.add_argument("--port", type=int)
+    web.add_argument("--frontend-dist-dir")
     args = parser.parse_args()
     if args.command is None:
         args.command = "run"
@@ -52,5 +82,7 @@ def main() -> None:
         args.objective = "Pick the detected workpiece"
     if args.command == "reload":
         asyncio.run(_reload(args))
+    elif args.command == "web":
+        _web(args)
     else:
         asyncio.run(_run(args))

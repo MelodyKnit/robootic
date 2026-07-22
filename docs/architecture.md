@@ -21,6 +21,21 @@ flowchart LR
 - 每次主目标成功执行后，镜像目标根据主目标遥测数据进行修正。
 - 开发模式重载获取调度锁，停止组件，重载请求的模块，重新读取同一个 JSON 配置文件并启动新组件。生产模式拒绝重载。
 
+## 相机网页预览边界
+
+```mermaid
+flowchart LR
+    Camera[VisionAdapter] --> Loop[单一采集循环]
+    Loop --> Cache[最新 JPEG 内存缓存]
+    Cache --> Snapshot[GET /frame]
+    Cache --> Stream[GET /stream 多浏览器复用]
+    Status[相机状态与重试] --> Api[GET /cameras 和 /status]
+```
+
+`gripper_ai_controller.web` 是独立的 ASGI 服务图，只组装一个 `VisionAdapter`、JPEG 编码器和内存帧缓存。它不构造 `Runtime`，不读取执行目标，不加载规划/感知/审计插件，不调用安全策略，也不连接机器人或夹爪适配器。相机连接或编码失败时，服务公开标准化的 `degraded` 状态并关闭后重试；它不会把采集画面或错误写入项目存储目录。
+
+HTTP 接口以相机 ID 建模，首版配置只允许一个相机：`/api/cameras`、`/api/cameras/{camera_id}/status`、`/api/cameras/{camera_id}/frame` 和 `/api/cameras/{camera_id}/stream`。未知相机统一返回 `404`，首帧不可用时快照返回 `503`，所有 JSON 错误均使用 `code` 和 `message`。静态构建前端由同一 FastAPI 进程提供，因此生产访问不需要跨域配置。
+
 ## 适配器合约
 
 每个适配器拥有异步的 `startup()` 和 `shutdown()` 生命周期方法。机器人和夹爪适配器暴露 `initialize`、`get_status`、`execute` 和 `synchronize`。视觉适配器仅通过 `ImageFrame` 暴露 `capture` 和相机健康状态。`BaseAdapter` 负责幂等生命周期状态；厂商连接仅在其生命周期钩子中创建或释放。

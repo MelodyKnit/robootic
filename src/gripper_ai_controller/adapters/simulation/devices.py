@@ -141,14 +141,17 @@ class SimulatedCameraAdapter(FrameDispatchingVisionAdapter):
     )
 
     def __init__(self, healthy: bool = True, frame_reference: str = "simulation://frame-1") -> None:
-        """Create a camera with configurable health and metadata-only frame reference."""
+        """Create a camera with a deterministic in-memory RGB test image."""
 
         super().__init__()
         self.healthy = healthy
         self.frame_reference = frame_reference
+        self.width = 320
+        self.height = 240
+        self.pixel_payload = self._build_pixel_payload()
 
     async def capture(self) -> ImageFrame:
-        """Emit one synthetic frame and notify observers without opening a camera device."""
+        """Emit one synthetic RGB frame and notify observers without opening a device."""
 
         frame = ImageFrame(
             camera_id="sim-camera",
@@ -156,6 +159,26 @@ class SimulatedCameraAdapter(FrameDispatchingVisionAdapter):
             frame_reference=self.frame_reference,
             calibration_id="sim-camera-calibration",
             healthy=self.healthy,
+            pixel_payload=self.pixel_payload,
+            width=self.width,
+            height=self.height,
+            pixel_format="rgb8",
         )
         await self.emit_frame(frame)
         return frame
+
+    def _build_pixel_payload(self) -> bytes:
+        """Create one reusable visible RGB calibration-style image without file I/O."""
+
+        pixels = bytearray(self.width * self.height * 3)
+        for y_value in range(self.height):
+            for x_value in range(self.width):
+                offset = (y_value * self.width + x_value) * 3
+                pixels[offset] = 28 + (x_value * 40 // self.width)
+                pixels[offset + 1] = 80 + (y_value * 80 // self.height)
+                pixels[offset + 2] = 110
+                if 96 <= x_value < 224 and 72 <= y_value < 168:
+                    pixels[offset] = 220
+                    pixels[offset + 1] = 150
+                    pixels[offset + 2] = 45
+        return bytes(pixels)
