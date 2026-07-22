@@ -5,7 +5,7 @@
 ## 生命周期和安全边界
 
 - `startup()`：枚举并打开一个 MVS USB3 Vision 相机，不启动取流，不修改任何参数。
-- `capture()`：按当前设备已有配置启动采集并复制一帧原始像素数据；不会保存文件，也不会运行感知模型。`ImageFrame` 会包含宽度、高度和规范化像素格式：`Mono8` 保留为 `mono8`，`RGB8` 为 `rgb8`，其他受支持彩色格式在释放 MVS 缓冲区前转换为 `rgb8`。成功构造帧后会按注册顺序调用该实例的 `on_frame()` 异步观察者。
+- `capture()`：按当前设备已有配置启动采集并复制一帧原始像素数据；不会保存文件，也不会运行感知模型。`ImageFrame` 会包含宽度、高度和规范化像素格式：`Mono8` 保留为 `mono8`，`Mono10/12/14/16`（含设备支持的 Packed 形式）在释放 MVS 缓冲区前转换为 `mono8`，`RGB8` 为 `rgb8`，其他受支持彩色格式转换为 `rgb8`。成功构造帧后会按注册顺序调用该实例的 `on_frame()` 异步观察者。
 - `get_camera_parameters()`：在相机已打开时读取实际可用的固定参数白名单。浮点范围和枚举选项均来自设备；当前型号不支持、不可读或受访问条件限制的节点不会出现在结果中。
 - `update_camera_parameters()`：只允许自动曝光 `ExposureAuto`、曝光时间 `ExposureTime`、自动增益 `GainAuto`、增益 `Gain`、帧率开关 `AcquisitionFrameRateEnable`、帧率 `AcquisitionFrameRate` 和像素格式 `PixelFormat`。曝光、增益和帧率为实时参数；像素格式需停止取流后应用，再自动恢复取流。该方法不会接受任意节点名、触发模式或持久化用户设置。
 - `shutdown()`：先等待正在执行的原生取帧返回，再按停止取流、关闭设备、销毁句柄、反初始化 SDK 的顺序释放资源。关闭请求最多受当前 `frame_timeout_ms` 与底层 SDK 返回时间影响，不能并发释放正在被 MVS 调用使用的句柄。

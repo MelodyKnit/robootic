@@ -167,6 +167,7 @@ class FakeMvsSdk:
     PixelType_Gvsp_Mono8 = 1
     PixelType_Gvsp_RGB8_Packed = 2
     PixelType_BayerRG8 = 3
+    PixelType_Gvsp_Mono10 = 4
     MV_FRAME_OUT = FakeFrameOut
     MV_CC_PIXEL_CONVERT_PARAM_EX = FakePixelConvertParams
 
@@ -194,6 +195,7 @@ class FakeNativeMvsCamera:
         self.source_buffer = None
         self.start_calls = 0
         self.free_calls = 0
+        self.conversion_destination_pixel_type = None
 
     def MV_CC_StartGrabbing(self):
         """Record acquisition start without changing camera configuration."""
@@ -219,6 +221,7 @@ class FakeNativeMvsCamera:
     def MV_CC_ConvertPixelTypeEx(self, conversion):
         """Write one configured RGB result into the caller-owned destination buffer."""
 
+        self.conversion_destination_pixel_type = conversion.enDstPixelType
         for index, value in enumerate(self.converted_payload):
             conversion.pDstBuffer[index] = value
         conversion.nDstLen = (
@@ -485,6 +488,7 @@ class HikvisionAdapterTests(unittest.TestCase):
                 "rgb8",
             ),
             (FakeMvsSdk.PixelType_BayerRG8, b"\x11", 1, 1, b"\x07\x08\x09", b"\x07\x08\x09", "rgb8"),
+            (FakeMvsSdk.PixelType_Gvsp_Mono10, b"\x00\x01\x02\x03", 2, 1, b"\x10\x20", b"\x10\x20", "mono8"),
         )
 
         for pixel_type, source, width, height, converted, expected, expected_format in cases:
@@ -499,6 +503,22 @@ class HikvisionAdapterTests(unittest.TestCase):
                 self.assertEqual(expected_format, frame.pixel_format)
                 self.assertEqual(1, camera.start_calls)
                 self.assertEqual(1, camera.free_calls)
+
+    def test_native_client_converts_high_bit_depth_monochrome_to_mono8(self):
+        camera = FakeNativeMvsCamera(
+            FakeMvsSdk.PixelType_Gvsp_Mono10,
+            b"\x00\x01\x02\x03",
+            2,
+            1,
+            b"\x10\x20",
+        )
+        client = create_native_client_for_frame(camera)
+
+        frame = client.capture_frame(250)
+
+        self.assertEqual("mono8", frame.pixel_format)
+        self.assertEqual(b"\x10\x20", frame.pixel_payload)
+        self.assertEqual(FakeMvsSdk.PixelType_Gvsp_Mono8, camera.conversion_destination_pixel_type)
 
     def test_native_client_releases_the_buffer_when_rgb_conversion_length_is_invalid(self):
         camera = FakeNativeMvsCamera(

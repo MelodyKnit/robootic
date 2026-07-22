@@ -139,9 +139,10 @@ class MvsUsbCameraClient:
         """Acquire and normalize one frame before always releasing the SDK buffer.
 
         Mono8 is retained as a generic ``mono8`` payload so a camera that exposes only
-        mono output does not depend on undocumented SDK conversion behavior. RGB8 is
-        copied directly; Bayer and other supported color formats are converted to RGB8
-        while the MVS-owned source buffer remains valid.
+        mono output does not depend on undocumented SDK conversion behavior. Higher-bit-depth
+        monochrome frames are converted to Mono8, which is directly encodable by the browser
+        preview. RGB8 is copied directly; Bayer and other supported color formats are converted
+        to RGB8 while the MVS-owned source buffer remains valid.
         """
 
         self._require_open_camera()
@@ -176,6 +177,8 @@ class MvsUsbCameraClient:
                 if frame_length != expected_length:
                     raise MvsCameraClientError("MVS RGB8 frame length does not match its dimensions.")
                 return MvsCapturedFrame(string_at(frame.pBufAddr, frame_length), width, height, "rgb8")
+            if source_pixel_type in self._high_bit_depth_monochrome_pixel_types():
+                return self._convert_to_mono8(frame, width, height, source_pixel_type, frame_length)
             return self._convert_to_rgb8(frame, width, height, source_pixel_type, frame_length)
         finally:
             if frame.pBufAddr:
@@ -307,6 +310,54 @@ class MvsUsbCameraClient:
         if destination_length != destination_size:
             raise MvsCameraClientError("MVS RGB conversion returned an unexpected output length.")
         return MvsCapturedFrame(bytes(destination[:destination_length]), width, height, "rgb8")
+
+    def _convert_to_mono8(
+        self,
+        frame: Any,
+        width: int,
+        height: int,
+        source_pixel_type: int,
+        source_length: int,
+    ) -> MvsCapturedFrame:
+        """Down-convert a higher-bit-depth monochrome MVS frame for JPEG encoding.
+
+        MVS cameras can expose Mono10, Mono12, Mono14, or Mono16 image formats. Asking the
+        SDK to convert those source formats directly to RGB8 fails on some camera models. Mono8
+        is the compatible intermediate representation and preserves a usable grayscale preview.
+        """
+
+        destination_size = width * height
+        if destination_size <= 0 or destination_size > 0xFFFFFFFF:
+            raise MvsCameraClientError("MVS Mono8 conversion output size is unsupported.")
+        destination = (c_ubyte * destination_size)()
+        conversion = self._sdk.MV_CC_PIXEL_CONVERT_PARAM_EX()
+        memset(byref(conversion), 0, sizeof(conversion))
+        conversion.nWidth = width
+        conversion.nHeight = height
+        conversion.enSrcPixelType = source_pixel_type
+        conversion.pSrcData = cast(frame.pBufAddr, POINTER(c_ubyte))
+        conversion.nSrcDataLen = source_length
+        conversion.enDstPixelType = self._sdk.PixelType_Gvsp_Mono8
+        conversion.pDstBuffer = cast(destination, POINTER(c_ubyte))
+        conversion.nDstBufferSize = destination_size
+        self._require_success("MV_CC_ConvertPixelTypeEx", self._camera.MV_CC_ConvertPixelTypeEx(conversion))
+        destination_length = int(conversion.nDstLen)
+        if destination_length != destination_size:
+            raise MvsCameraClientError("MVS Mono8 conversion returned an unexpected output length.")
+        return MvsCapturedFrame(bytes(destination[:destination_length]), width, height, "mono8")
+
+    def _high_bit_depth_monochrome_pixel_types(self) -> Sequence[int]:
+        """Return MVS monochrome source constants available in the copied SDK version."""
+
+        names = (
+            "PixelType_Gvsp_Mono10",
+            "PixelType_Gvsp_Mono10_Packed",
+            "PixelType_Gvsp_Mono12",
+            "PixelType_Gvsp_Mono12_Packed",
+            "PixelType_Gvsp_Mono14",
+            "PixelType_Gvsp_Mono16",
+        )
+        return tuple(getattr(self._sdk, name) for name in names if hasattr(self._sdk, name))
 
     def close_camera(self) -> None:
         """Release acquisition, device, handle, and SDK resources in reverse order."""
