@@ -23,6 +23,7 @@
       ]
     }
   },
+  "camera_parameters": {},
   "targets": [
     {
       "name": "sim-primary",

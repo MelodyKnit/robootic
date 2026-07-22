@@ -1,6 +1,46 @@
 """Configuration owned by the application rather than hardware adapters."""
 
 from dataclasses import dataclass
+import math
+from typing import Any, Dict, Mapping
+
+from gripper_ai_controller.domain.models import CameraParameterValue
+
+
+class CameraParameterConfigurationError(ValueError):
+    """Report an invalid JSON camera-parameter override mapping."""
+
+
+def validate_camera_parameter_overrides(value: Any) -> Dict[str, CameraParameterValue]:
+    """Normalize the scalar camera parameters allowed in an explicit JSON configuration.
+
+    Device-specific availability, ranges, enum options, and parameter dependencies are
+    intentionally validated later by the connected adapter. This parser only protects
+    the JSON contract from nested values, non-finite numbers, and empty parameter keys.
+    """
+
+    if not isinstance(value, Mapping):
+        raise CameraParameterConfigurationError("camera_parameters must be a JSON object.")
+    overrides = {}  # type: Dict[str, CameraParameterValue]
+    for key, parameter_value in value.items():
+        if not isinstance(key, str) or not key:
+            raise CameraParameterConfigurationError("Every camera_parameters key must be a non-empty string.")
+        if type(parameter_value) is bool:
+            overrides[key] = parameter_value
+        elif type(parameter_value) in (int, float):
+            normalized_value = float(parameter_value)
+            if not math.isfinite(normalized_value):
+                raise CameraParameterConfigurationError(
+                    "camera_parameters values must be finite JSON scalars."
+                )
+            overrides[key] = normalized_value
+        elif isinstance(parameter_value, str):
+            overrides[key] = parameter_value
+        else:
+            raise CameraParameterConfigurationError(
+                "camera_parameters values must be string, number, or boolean scalars."
+            )
+    return overrides
 
 
 @dataclass(frozen=True)

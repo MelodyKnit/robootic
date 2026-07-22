@@ -48,9 +48,9 @@ poetry run gripper-ai-controller web --config-file configs/development.json
 
 默认服务绑定 `0.0.0.0:8000`，浏览器访问 `http://本机地址:8000/`。可使用 `--host`、`--port` 和 `--frontend-dist-dir` 覆盖对应配置值；它们均不会写回配置文件。开发前端可在 `src/web/` 中执行 `pnpm dev`，Vite 会将 `/api` 代理到本机 `8000` 端口。
 
-预览接口包括 `GET /api/cameras`、`GET /api/cameras/{camera_id}/status`、`GET /api/cameras/{camera_id}/frame` 和 `GET /api/cameras/{camera_id}/stream`。海康适配器还可以公开固定白名单的相机参数：`GET /api/cameras/{camera_id}/parameters` 用于读取实际设备能力，`PATCH /api/cameras/{camera_id}/parameters/{parameter_key}` 只允许立即生效参数，`POST /api/cameras/{camera_id}/parameters/apply` 用于明确保存需要暂停取流的参数并自动恢复采集。
+预览接口包括 `GET /api/cameras`、`GET /api/cameras/{camera_id}/status`、`GET /api/cameras/{camera_id}/frame` 和 `GET /api/cameras/{camera_id}/stream`。海康适配器还可以公开固定白名单的相机参数：`GET /api/cameras/{camera_id}/parameters` 用于读取实际设备能力，`PATCH /api/cameras/{camera_id}/parameters/{parameter_key}` 只允许立即生效参数，`POST /api/cameras/{camera_id}/parameters/apply` 用于提交需要暂停取流的参数并自动恢复采集。设备成功应用后，服务会将实际生效值写回显式传入 JSON 配置根对象的 `camera_parameters`；服务启动或相机重连后，会在首帧前恢复该对象中的参数。
 
-版本化海康模板默认将 `web.camera_controls_enabled` 设为 `false`。真实设备写入只能在被 Git 忽略的 `localstore/` 本机配置中显式设为 `true`。服务绑定 `0.0.0.0` 且没有认证、TLS、来源限制或访问审计；一旦启用参数写入，受信任局域网中的访问者可以修改已公开的相机参数，因此绝不能暴露到互联网。无论该开关如何设置，网页服务都不提供机器人或夹爪控制接口。
+版本化 `configs/` 中的海康文件仅是模板，默认将 `web.camera_controls_enabled` 设为 `false`。真实设备写入只能在被 Git 忽略的 `localstore/` 本机配置中显式设为 `true`；被传入 `--config-file` 的本机 JSON 也是相机参数持久化的唯一写入目标。若设备已成功应用参数但配置写回失败，接口会明确报告“设备已生效、配置未保存”的失败，操作者应修复本机文件权限或内容后重新提交。服务绑定 `0.0.0.0` 且没有认证、TLS、来源限制或访问审计；一旦启用参数写入，受信任局域网中的访问者可以修改已公开的相机参数，因此绝不能暴露到互联网。无论该开关如何设置，网页服务都不提供机器人或夹爪控制接口。
 
 使用实物海康 USB 相机时，先将 `configs/hikvision-usb.example.json` 复制到 `localstore/`，填写本机标定标识；只有系统枚举到一台相机时才可省略序列号。该配置不应提交。详细接口、重试和图像格式规则见 [相机网页预览后端说明](src/gripper_ai_controller/web/README.md)。
 
@@ -80,7 +80,7 @@ poetry run gripper-ai-controller web --config-file configs/development.json
 
 ## 海康 USB 相机接入
 
-项目内的 `adapters/hikvision/` 提供 MVS USB3 Vision 帧源和受限参数适配器。它在启动时打开指定相机，在 `capture()` 时复制原始帧，并在关闭时释放 MVS 资源。只有网页服务经本机配置显式允许时，它才会通过固定白名单读取或修改自动曝光、曝光时间、自动增益、增益、帧率开关、帧率和像素格式；不会公开任意 MVS 节点、触发模式或持久化 UserSet 设置。像素格式属于暂停取流后保存并自动恢复采集的参数。版本化配置只提供占位模板，真实相机序列号和标定标识必须保存于 `localstore/`。MVS Python 封装和 Windows 运行库必须从官方安装包复制到该适配器目录；在取得再分发授权前，它们仅作为本机资产，不随 Git 或 Poetry 构建发布。
+项目内的 `adapters/hikvision/` 提供 MVS USB3 Vision 帧源和受限参数适配器。它在启动时打开指定相机，在 `capture()` 时复制原始帧，并在关闭时释放 MVS 资源。只有网页服务经本机配置显式允许时，它才会通过固定白名单读取或修改自动曝光、曝光时间、自动增益、增益、帧率开关、帧率和像素格式；不会公开任意 MVS 节点、触发模式或设备持久化的 UserSet 设置。像素格式属于暂停取流后应用并自动恢复采集的参数。网页服务会在设备更新成功后把实际生效值写回启动时显式传入 JSON 的 `camera_parameters`，并在启动或重连的首帧前恢复；这不是对相机设备执行 `FeatureSave` 或 `UserSetSave`。版本化配置只提供占位模板，真实相机序列号、标定标识和可写本机配置必须保存于 `localstore/`。MVS Python 封装和 Windows 运行库必须从官方安装包复制到该适配器目录；在取得再分发授权前，它们仅作为本机资产，不随 Git 或 Poetry 构建发布。
 
 详细边界、SDK 文件和验证方式见 [海康适配器说明](src/gripper_ai_controller/adapters/hikvision/README.md)。
 

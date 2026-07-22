@@ -11,10 +11,10 @@
 - `GET /api/cameras/{camera_id}/frame`：最新 JPEG 快照；首帧未准备好时返回 `503`。
 - `GET /api/cameras/{camera_id}/stream`：MJPEG 连续流；所有浏览器复用同一采集循环和最新 JPEG 缓存。
 - `GET /api/cameras/{camera_id}/parameters`：读取当前设备实际支持的固定参数白名单、取值范围、选项及应用方式。
-- `PATCH /api/cameras/{camera_id}/parameters/{parameter_key}`：立即应用一个 `live` 参数，请求体为 `{ "value": ... }`。
-- `POST /api/cameras/{camera_id}/parameters/apply`：保存一个或多个 `restart` 参数，请求体为 `{ "values": { "pixel_format": "Mono8" } }`。后端会停止取流、写入并恢复取流。
+- `PATCH /api/cameras/{camera_id}/parameters/{parameter_key}`：立即应用一个 `live` 参数，请求体为 `{ "value": ... }`。设备成功后，实际生效值会写回显式配置的 `camera_parameters`。
+- `POST /api/cameras/{camera_id}/parameters/apply`：提交一个或多个 `restart` 参数，请求体为 `{ "values": { "pixel_format": "Mono8" } }`。后端会停止取流、写入、更新配置并恢复取流。
 
-参数列表响应包含 `camera_id`、`write_enabled` 和 `parameters`。每个参数带有 `key`、`kind`、`apply_mode`、`value`、可选的数值范围和单位，以及枚举选项。更新响应额外带有 `restarted_acquisition`。未知相机返回 `404`；写入开关未启用时返回 `403`；适配器未提供控制能力时返回 `409`；格式、范围或应用方式错误返回 `422`。所有 JSON 错误均为 `code` 和 `message`。
+参数列表响应包含 `camera_id`、`write_enabled` 和 `parameters`。每个参数带有 `key`、`kind`、`apply_mode`、`value`、可选的数值范围和单位，以及枚举选项。更新响应额外带有 `restarted_acquisition`。未知相机返回 `404`；写入开关未启用时返回 `403`；适配器未提供控制能力时返回 `409`；格式、范围或应用方式错误返回 `422`。设备成功应用参数但无法写回配置时返回 `503`，错误 `code` 为 `camera_parameter_persistence_failed`，含义是设备已生效而配置未保存。所有 JSON 错误均为 `code` 和 `message`。
 
 ## 参数安全边界
 
@@ -22,9 +22,13 @@
 
 海康首版白名单为自动曝光、曝光时间、自动增益、增益、帧率开关、帧率和像素格式。实际数值范围与枚举选项均从已连接设备读取；当前设备不支持或不可读的节点不会出现在列表中。自动曝光或自动增益开启时，后端与页面都会拒绝对应手动参数；帧率设置要求帧率控制已启用。像素格式被标记为 `restart`，只能通过明确的保存操作应用。
 
-同一异步操作锁覆盖取帧、节点读取、节点写入、停止取流、恢复取流和关闭相机，避免 MVS 句柄同时被原生取帧和重配置访问。参数写入只作用于当前连接会话，绝不调用 `FeatureSave`、`UserSetSave` 或其他持久化命令。
+同一异步操作锁覆盖取帧、节点读取、节点写入、停止取流、恢复取流和关闭相机，避免 MVS 句柄同时被原生取帧和重配置访问。设备成功写入后，服务将适配器确认的本次实际值及其必要前置开关原子写回启动 CLI 显式传入 JSON 的根 `camera_parameters`；适配器启动和每次断连重连后，会在首帧前恢复该对象。恢复失败会使预览进入可重试的降级状态，而非静默使用默认参数。此配置持久化绝不调用 `FeatureSave`、`UserSetSave` 或其他厂商设备持久化命令。
 
-`web.camera_controls_enabled` 默认为 `false`。应只在被 Git 忽略的 `localstore/` 实机配置中显式设为 `true`。服务默认可按配置绑定 `0.0.0.0`，且没有认证、TLS、来源限制或访问审计；启用写入后，受信任局域网中的访问者能够更改白名单内相机参数，不能暴露到互联网。
+`web.camera_controls_enabled` 同时约束浏览器写入和自动恢复。将它设为 `false` 后，服务仍可只读预览，但即使 JSON 中保留旧的 `camera_parameters`，启动或重连也不会向设备写入参数。
+
+浏览器刷新仅重新读取状态、参数能力和视频流，不会重置设备参数或改写 `camera_parameters`。
+
+`web.camera_controls_enabled` 默认为 `false`。应只在被 Git 忽略的 `localstore/` 实机配置中显式设为 `true`，并将该文件作为 `--config-file` 传入。受版本控制的 `configs/` 仅为模板；若用模板直接启动，成功参数写入会修改该模板并使 Git 工作区产生变更。服务默认可按配置绑定 `0.0.0.0`，且没有认证、TLS、来源限制或访问审计；启用写入后，受信任局域网中的访问者能够更改白名单内相机参数，不能暴露到互联网。
 
 ## 图像契约
 

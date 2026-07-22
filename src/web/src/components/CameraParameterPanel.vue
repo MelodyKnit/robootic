@@ -93,7 +93,7 @@ function controlDisabled(parameter: CameraParameter): boolean {
 }
 
 function applyModeLabel(parameter: CameraParameter): string {
-  return parameter.applyMode === 'live' ? '立即生效' : '保存后重新采集'
+  return parameter.applyMode === 'live' ? '立即生效并保存' : '保存并重新采集'
 }
 </script>
 

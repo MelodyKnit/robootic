@@ -6,4 +6,4 @@
 
 真实 JAKA 控制器配置应从 `configs/jaka-hardware.example.json` 复制到本目录后再填写。该本地副本可保存控制器地址和是否允许显式使能，但不得记录密码、令牌、完整遥测或采集数据。
 
-真实海康 USB 相机配置应从 `configs/hikvision-usb.example.json` 复制到本目录后填写相机序列号和真实标定标识。不得将采集图像、完整帧载荷、相机 SDK 日志或设备私有设置提交到版本库。
+真实海康 USB 相机配置应从 `configs/hikvision-usb.example.json` 复制到本目录后填写相机序列号和真实标定标识，并作为显式 `--config-file` 传入网页服务。设备成功应用网页参数后，服务会将实际生效值写回该文件根对象的 `camera_parameters`，并在启动或重连的首帧前恢复；这不会调用相机的设备持久化命令。不得将采集图像、完整帧载荷、相机 SDK 日志或设备私有设置提交到版本库。

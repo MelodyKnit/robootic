@@ -1,7 +1,8 @@
 """Build the isolated vision-preview graph from an explicit JSON configuration."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 from gripper_ai_controller.bootstrap.runtime_builder import (
     VISION_ADAPTERS,
@@ -11,7 +12,11 @@ from gripper_ai_controller.bootstrap.runtime_builder import (
     required_mapping,
     required_string,
 )
-from gripper_ai_controller.configuration import WebPreviewSettings
+from gripper_ai_controller.configuration import (
+    WebPreviewSettings,
+    validate_camera_parameter_overrides,
+)
+from gripper_ai_controller.domain.models import CameraParameterValue
 from gripper_ai_controller.domain.ports import VisionAdapter
 
 
@@ -22,6 +27,10 @@ class VisionPreviewConfig:
     camera_id: str
     vision: VisionAdapter
     settings: WebPreviewSettings
+    camera_parameter_overrides: Dict[str, CameraParameterValue] = field(default_factory=dict)
+    config_file: Optional[str] = None
+    vision_name: Optional[str] = None
+    vision_adapter_settings: Dict[str, Any] = field(default_factory=dict)
 
 
 def load_vision_preview_config(config_file: str) -> VisionPreviewConfig:
@@ -35,15 +44,25 @@ def load_vision_preview_config(config_file: str) -> VisionPreviewConfig:
     payload = load_json_config(config_file)
     camera = required_mapping(payload, "camera")
     components = required_mapping(payload, "components")
+    camera_id = required_string(camera, "camera_id")
+    vision_name = required_string(components, "vision")
+    vision_adapter_settings = optional_mapping(components, "vision_adapter_settings")
+    camera_parameter_overrides = validate_camera_parameter_overrides(
+        payload.get("camera_parameters", {})
+    )
     return VisionPreviewConfig(
-        camera_id=required_string(camera, "camera_id"),
+        camera_id=camera_id,
         vision=create_component(
             VISION_ADAPTERS,
-            required_string(components, "vision"),
+            vision_name,
             "vision adapter",
-            optional_mapping(components, "vision_adapter_settings"),
+            vision_adapter_settings,
         ),
         settings=_build_web_settings(optional_mapping(payload, "web")),
+        camera_parameter_overrides=camera_parameter_overrides,
+        config_file=config_file,
+        vision_name=vision_name,
+        vision_adapter_settings=dict(vision_adapter_settings),
     )
 
 

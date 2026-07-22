@@ -13,10 +13,12 @@ from pydantic import BaseModel
 from gripper_ai_controller.bootstrap.preview_builder import VisionPreviewConfig
 from gripper_ai_controller.domain.models import CameraParameter, CameraParameterApplyMode
 from gripper_ai_controller.domain.ports import CameraParameterError
+from gripper_ai_controller.web.config_store import CameraParameterConfigStore
 from gripper_ai_controller.web.models import CameraPreviewStatus
 from gripper_ai_controller.web.service import (
     CameraParameterCapabilityError,
     CameraParameterOperationError,
+    CameraParameterPersistenceError,
     CameraParameterWriteDisabledError,
     CameraPreviewService,
 )
@@ -98,9 +100,24 @@ def create_web_app(
 ) -> FastAPI:
     """Create one FastAPI app that owns only the configured vision preview service."""
 
-    service = preview_service or CameraPreviewService(
-        preview_config.camera_id, preview_config.vision, preview_config.settings
-    )
+    if preview_service is None:
+        parameter_store = None
+        if preview_config.config_file is not None and preview_config.vision_name is not None:
+            parameter_store = CameraParameterConfigStore(
+                preview_config.config_file,
+                preview_config.camera_id,
+                preview_config.vision_name,
+                preview_config.vision_adapter_settings,
+            )
+        service = CameraPreviewService(
+            preview_config.camera_id,
+            preview_config.vision,
+            preview_config.settings,
+            preview_config.camera_parameter_overrides,
+            parameter_store,
+        )
+    else:
+        service = preview_service
 
     @asynccontextmanager
     async def lifespan(application):
@@ -313,6 +330,12 @@ async def _apply_camera_parameters(
             503,
             "camera_parameter_apply_failed",
             "The camera could not apply the requested parameter update.",
+        )
+    except CameraParameterPersistenceError:
+        return _error_response(
+            503,
+            "camera_parameter_persistence_failed",
+            "The camera applied the requested parameter, but the local configuration could not be saved.",
         )
     return _parameter_update_response(service, result.parameters, result.restarted_acquisition)
 

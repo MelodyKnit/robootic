@@ -13,6 +13,7 @@
       "observers": ["audit"]
     }
   },
+  "camera_parameters": {},
   "targets": [
     {
       "name": "sim-primary",

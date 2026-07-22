@@ -2,7 +2,7 @@
 
 import asyncio
 import time
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 from gripper_ai_controller.configuration import WebPreviewSettings
 from gripper_ai_controller.domain.models import (
@@ -17,6 +17,10 @@ from gripper_ai_controller.domain.ports import (
     VisionAdapter,
 )
 from gripper_ai_controller.web.codec import JpegFrameEncoder
+from gripper_ai_controller.web.config_store import (
+    CameraParameterConfigStore,
+    CameraParameterConfigStoreError,
+)
 from gripper_ai_controller.web.models import (
     CameraPreviewError,
     CameraPreviewStatus,
@@ -34,6 +38,22 @@ class CameraParameterWriteDisabledError(RuntimeError):
 
 class CameraParameterOperationError(RuntimeError):
     """Report a non-validation camera parameter failure without exposing vendor details."""
+
+
+class CameraParameterPersistenceError(RuntimeError):
+    """Report a successful device update that could not be saved for a future restart."""
+
+
+class CameraParameterRestoreError(RuntimeError):
+    """Report a configured parameter replay failure before browser frames are acquired."""
+
+
+_PERSISTED_PARAMETER_DEPENDENCIES = {
+    "exposure_time_us": ("exposure_auto", "Off"),
+    "gain_db": ("gain_auto", "Off"),
+    "frame_rate_fps": ("frame_rate_enabled", True),
+}
+"""Manual controls whose enabling value must be replayed with the saved setting."""
 
 
 class FrameHub:
@@ -125,8 +145,20 @@ class CameraPreviewService:
     configuration that also declares physical robot targets.
     """
 
-    def __init__(self, camera_id: str, vision: VisionAdapter, settings: WebPreviewSettings) -> None:
-        """Bind one configured vision adapter and bounded browser-facing settings."""
+    def __init__(
+        self,
+        camera_id: str,
+        vision: VisionAdapter,
+        settings: WebPreviewSettings,
+        camera_parameter_overrides: Optional[Mapping[str, CameraParameterValue]] = None,
+        parameter_store: Optional[CameraParameterConfigStore] = None,
+    ) -> None:
+        """Bind one configured vision adapter, settings, and optional JSON overrides.
+
+        ``parameter_store`` is intentionally optional for direct unit tests and callers
+        that use a transient adapter. A normal CLI-created web application always
+        supplies the store bound to its explicit ``--config-file`` argument.
+        """
 
         self.camera_id = camera_id
         self.vision = vision
@@ -135,6 +167,9 @@ class CameraPreviewService:
         self.hub = FrameHub(camera_id)
         self._capture_task = None  # type: Optional[asyncio.Task]
         self._operation_lock = None  # type: Optional[Any]
+        self._camera_parameter_overrides = dict(camera_parameter_overrides or {})
+        self._parameter_store = parameter_store
+        self._camera_parameter_overrides_restored = False
 
     async def startup(self) -> None:
         """Begin the single shared acquisition task without starting any execution runtime.
@@ -228,8 +263,13 @@ class CameraPreviewService:
                                 parameter.apply_mode.value
                             )
                         )
-                return await adapter.update_camera_parameters(updates)
+                result = await adapter.update_camera_parameters(updates)
+                persisted_values = self._values_to_persist(updates, result.parameters)
+                await self._persist_camera_parameter_overrides(persisted_values)
+                return result
             except CameraParameterError:
+                raise
+            except CameraParameterPersistenceError:
                 raise
             except Exception as error:
                 raise CameraParameterOperationError(
@@ -246,11 +286,22 @@ class CameraPreviewService:
             try:
                 async with self._operation_lock_for_current_loop():
                     await self.vision.startup()
+                    await self._restore_camera_parameter_overrides()
                     frame = await self.vision.capture()
                 jpeg_payload = await event_loop.run_in_executor(None, self.encoder.encode, frame)
                 await self.hub.publish(jpeg_payload, frame.captured_at)
             except asyncio.CancelledError:
                 raise
+            except CameraParameterRestoreError:
+                await self.hub.mark_degraded(
+                    CameraPreviewError(
+                        "camera_parameter_restore_failed",
+                        "Configured camera parameters could not be restored and will retry automatically.",
+                    )
+                )
+                await self._reset_vision_after_failure()
+                await asyncio.sleep(self.settings.capture_retry_seconds)
+                continue
             except Exception:
                 await self.hub.mark_degraded(
                     CameraPreviewError(
@@ -271,10 +322,101 @@ class CameraPreviewService:
 
         try:
             async with self._operation_lock_for_current_loop():
+                self._camera_parameter_overrides_restored = False
                 await self.vision.shutdown()
         except Exception:
             # The public preview error remains normalized even when SDK cleanup also fails.
             pass
+
+    def _values_to_persist(
+        self,
+        updates: Mapping[str, CameraParameterValue],
+        parameters: Tuple[CameraParameter, ...],
+    ) -> Dict[str, CameraParameterValue]:
+        """Retain observed updated values and the prerequisite controls needed at startup.
+
+        Persisting every readable device node would make a manual exposure value fail
+        when automatic exposure is deliberately enabled later. This method keeps the
+        stored document to the user's explicit changes, adding only the corresponding
+        prerequisite control for settings that require it.
+        """
+
+        observed_values = {parameter.key: parameter.value for parameter in parameters}
+        missing_values = set(updates).difference(observed_values)
+        if missing_values:
+            raise CameraParameterPersistenceError(
+                "The camera applied the requested parameter, but did not report its resulting value."
+            )
+        persisted_values = dict(self._camera_parameter_overrides)
+        for key in updates:
+            persisted_values[key] = observed_values[key]
+        for manual_key, dependency in _PERSISTED_PARAMETER_DEPENDENCIES.items():
+            control_key, required_value = dependency
+            if manual_key in updates:
+                if control_key not in observed_values:
+                    raise CameraParameterPersistenceError(
+                        "The camera applied the requested parameter, but did not report its prerequisite state."
+                    )
+                persisted_values[control_key] = observed_values[control_key]
+            if control_key in updates and observed_values.get(control_key) != required_value:
+                persisted_values.pop(manual_key, None)
+        return persisted_values
+
+    async def _persist_camera_parameter_overrides(
+        self, values: Mapping[str, CameraParameterValue]
+    ) -> None:
+        """Atomically persist the complete managed override mapping after device success."""
+
+        try:
+            if self._parameter_store is None:
+                persisted_values = dict(values)
+            else:
+                event_loop = asyncio.get_event_loop()
+                persisted_values = await event_loop.run_in_executor(
+                    None, self._parameter_store.replace_values, values
+                )
+        except (CameraParameterConfigStoreError, OSError, ValueError) as error:
+            # The device already accepted the update. Keep that state for this running
+            # service so a transient camera reconnect cannot restore an older file value.
+            self._camera_parameter_overrides = dict(values)
+            raise CameraParameterPersistenceError(
+                "The camera applied the requested parameter, but the local configuration could not be saved."
+            ) from error
+        except Exception as error:
+            # The same in-memory behavior applies to unexpected storage failures.
+            self._camera_parameter_overrides = dict(values)
+            raise CameraParameterPersistenceError(
+                "The camera applied the requested parameter, but the local configuration could not be saved."
+            ) from error
+        self._camera_parameter_overrides = dict(persisted_values)
+
+    async def _restore_camera_parameter_overrides(self) -> None:
+        """Replay configured values once after adapter startup and before the first capture.
+
+        This method must run while the shared operation lock is held. Both provided
+        adapters require their lifecycle ``startup`` to finish before controlled
+        parameter writes are valid, and a capture must not race this replay.
+        """
+
+        if self._camera_parameter_overrides_restored:
+            return
+        if not self._camera_parameter_overrides:
+            self._camera_parameter_overrides_restored = True
+            return
+        if not self.camera_controls_enabled:
+            # One local authorization switch protects browser writes and automatic
+            # replay. A disabled control surface must never alter the camera during
+            # startup or recovery merely because an older JSON file contains values.
+            self._camera_parameter_overrides_restored = True
+            return
+        try:
+            adapter = self._parameter_adapter()
+            await adapter.update_camera_parameters(self._camera_parameter_overrides)
+        except Exception as error:
+            raise CameraParameterRestoreError(
+                "Configured camera parameters could not be restored."
+            ) from error
+        self._camera_parameter_overrides_restored = True
 
     def _parameter_adapter(self) -> CameraParameterAdapter:
         """Return the optional controlled-parameter port without exposing SDK clients."""
