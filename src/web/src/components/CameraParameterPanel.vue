@@ -91,36 +91,46 @@ function controlDisabled(parameter: CameraParameter): boolean {
     ? isManualControlDisabled(parameter)
     : isApplying.value || !writeEnabled.value
 }
-
-function applyModeLabel(parameter: CameraParameter): string {
-  return parameter.applyMode === 'live' ? '立即生效并保存' : '保存并重新采集'
-}
 </script>
 
 <template>
-  <section v-if="cameraId !== null" class="parameter-panel" aria-label="相机参数">
-    <div class="parameter-panel-header">
+  <section v-if="cameraId !== null" class="p-5 flex flex-col h-full bg-slate-950 text-slate-300 select-none" aria-label="相机参数">
+    <div class="mb-4 shrink-0 flex items-center justify-between">
       <div>
-        <h2>相机参数</h2>
-        <p v-if="isLoading" class="parameter-state">正在读取</p>
-        <p v-else-if="!writeEnabled && parameters.length > 0" class="parameter-state">本机配置已禁用写入</p>
+        <h2 class="text-xs font-bold text-slate-500 uppercase tracking-widest">相机参数</h2>
+        <p v-if="isLoading" class="text-xs text-amber-500 font-medium mt-1">正在连接获取设备参数...</p>
+        <p v-else-if="!writeEnabled && parameters.length > 0" class="text-xs text-slate-500 mt-1">
+          当前配置为只读
+        </p>
       </div>
     </div>
 
-    <p v-if="errorMessage" class="error-message" role="alert">{{ errorMessage }}</p>
+    <!-- Error feedback. -->
+    <p v-if="errorMessage" class="mb-4 text-xs text-rose-400 bg-rose-950/20 border border-rose-900/40 rounded py-2 px-3 shrink-0" role="alert">
+      {{ errorMessage }}
+    </p>
 
-    <div v-else-if="parameters.length > 0" class="parameter-grid">
-      <div v-for="parameter in parameters" :key="parameter.key" class="parameter-field">
-        <div class="parameter-label-row">
-          <label :for="`camera-parameter-${parameter.key}`">{{ parameterLabel(parameter) }}</label>
-          <span class="parameter-apply-mode">{{ applyModeLabel(parameter) }}</span>
+    <!-- Scrollable parameter form. -->
+    <div v-else-if="parameters.length > 0" class="space-y-4">
+      <div v-for="parameter in parameters" :key="parameter.key" class="pb-4 border-b border-slate-900 last:border-0">
+        <div class="flex justify-between items-baseline mb-2">
+          <label :for="`camera-parameter-${parameter.key}`" class="text-xs font-bold text-slate-400">
+            {{ parameterLabel(parameter) }}
+          </label>
+          <span
+            class="text-[9px] font-bold px-1.5 py-0.5 rounded border"
+            :class="parameter.applyMode === 'live' ? 'bg-emerald-950/50 text-emerald-400 border-emerald-900/50' : 'bg-amber-950/50 text-amber-400 border-amber-900/50'"
+          >
+            {{ parameter.applyMode === 'live' ? '实时保存' : '保存重连' }}
+          </span>
         </div>
 
+        <!-- Floating-point parameter control. -->
         <template v-if="parameter.kind === 'float'">
-          <div class="numeric-control-row">
+          <div class="flex items-center gap-3">
             <input
               :id="`camera-parameter-${parameter.key}`"
-              class="parameter-range"
+              class="flex-1 h-1 bg-slate-900 rounded-lg appearance-none cursor-pointer accent-emerald-500 hover:accent-emerald-400 transition"
               type="range"
               :min="parameter.minimum ?? undefined"
               :max="parameter.maximum ?? undefined"
@@ -130,55 +140,65 @@ function applyModeLabel(parameter: CameraParameter): string {
               @input="updateNumberDraft(parameter, $event)"
               @change="commitLiveParameter(parameter, $event)"
             />
-            <input
-              :id="`camera-parameter-value-${parameter.key}`"
-              :aria-label="`${parameterLabel(parameter)}数值`"
-              class="parameter-number"
-              type="number"
-              :min="parameter.minimum ?? undefined"
-              :max="parameter.maximum ?? undefined"
-              :step="sliderStep(parameter)"
-              :value="numericValue(parameter)"
-              :disabled="controlDisabled(parameter)"
-              @input="updateNumberDraft(parameter, $event)"
-              @change="commitLiveParameter(parameter, $event)"
-            />
-            <span v-if="unitLabel(parameter)" class="parameter-unit">{{ unitLabel(parameter) }}</span>
+            <div class="relative shrink-0 w-24">
+              <input
+                :id="`camera-parameter-value-${parameter.key}`"
+                :aria-label="`${parameterLabel(parameter)}数值`"
+                class="w-full text-right pr-6 py-1 text-xs font-mono font-bold text-slate-200 bg-slate-900/50 border border-slate-800 rounded focus:outline-none focus:ring-1 focus:ring-slate-700 hover:border-slate-700 disabled:opacity-50 transition"
+                type="number"
+                :min="parameter.minimum ?? undefined"
+                :max="parameter.maximum ?? undefined"
+                :step="sliderStep(parameter)"
+                :value="numericValue(parameter)"
+                :disabled="controlDisabled(parameter)"
+                @input="updateNumberDraft(parameter, $event)"
+                @change="commitLiveParameter(parameter, $event)"
+              />
+              <span v-if="unitLabel(parameter)" class="absolute right-2 top-1/2 -translate-y-1/2 text-[9px] font-bold text-slate-500 uppercase">
+                {{ unitLabel(parameter) }}
+              </span>
+            </div>
           </div>
         </template>
 
+        <!-- Enumerated parameter control. -->
         <select
           v-else-if="parameter.kind === 'enum'"
           :id="`camera-parameter-${parameter.key}`"
-          class="parameter-select"
+          class="w-full py-1.5 px-3 text-xs font-semibold text-slate-300 bg-slate-900/50 border border-slate-800 rounded focus:outline-none focus:ring-1 focus:ring-slate-700 hover:border-slate-700 disabled:opacity-50 transition cursor-pointer"
           :value="enumValue(parameter)"
           :disabled="controlDisabled(parameter)"
           @change="updateEnumDraft(parameter, $event); commitLiveParameter(parameter, $event)"
         >
-          <option v-for="option in parameter.options" :key="option" :value="option">{{ option }}</option>
+          <option v-for="option in parameter.options" :key="option" :value="option" class="bg-slate-950 text-slate-300 font-semibold">{{ option }}</option>
         </select>
 
-        <label v-else class="parameter-toggle" :for="`camera-parameter-${parameter.key}`">
+        <!-- Boolean parameter control. -->
+        <label v-else class="flex items-center gap-3 cursor-pointer select-none" :for="`camera-parameter-${parameter.key}`">
           <input
             :id="`camera-parameter-${parameter.key}`"
             type="checkbox"
+            class="w-3.5 h-3.5 text-emerald-600 bg-slate-900 border-slate-800 rounded focus:ring-emerald-500 accent-emerald-500"
             :checked="booleanValue(parameter)"
             :disabled="controlDisabled(parameter)"
             @change="updateBooleanDraft(parameter, $event); commitLiveParameter(parameter, $event)"
           />
-          <span>{{ booleanValue(parameter) ? '已启用' : '已关闭' }}</span>
+          <span class="text-xs font-semibold text-slate-400">
+            {{ booleanValue(parameter) ? '已激活' : '非活动状态' }}
+          </span>
         </label>
       </div>
     </div>
 
-    <div v-if="hasRestartParameters" class="parameter-actions">
+    <!-- Explicit action area for settings that require acquisition restart. -->
+    <div v-if="hasRestartParameters" class="mt-5 pt-4 border-t border-slate-900 shrink-0">
       <button
-        class="apply-restart-button"
+        class="w-full py-2 px-4 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-md shadow-emerald-500/10 hover:shadow-emerald-500/20 active:scale-[0.99] transition disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none focus:outline-none"
         type="button"
         :disabled="isApplying || !writeEnabled || !hasRestartChanges"
         @click="applyRestartChanges"
       >
-        {{ isApplying ? '正在应用' : '保存并重新采集' }}
+        {{ isApplying ? '正在重启并保存参数...' : '保存并重新采集' }}
       </button>
     </div>
   </section>

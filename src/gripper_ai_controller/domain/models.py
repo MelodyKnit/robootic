@@ -245,6 +245,18 @@ class RobotStatus:
 
 
 @dataclass(frozen=True)
+class JointPositionSnapshot:
+    """One timestamped six-axis joint-angle observation in radians.
+
+    This contract describes robot configuration coordinates such as J1 through J6.
+    It does not describe the Cartesian positions of the physical joint axes or links.
+    """
+
+    captured_at: float
+    joint_positions_rad: Tuple[float, float, float, float, float, float]
+
+
+@dataclass(frozen=True)
 class TelemetrySnapshot:
     """A synchronized robot and gripper state for one execution target."""
 

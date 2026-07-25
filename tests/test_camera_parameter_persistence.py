@@ -511,10 +511,11 @@ class CameraParameterPersistenceHttpTests(unittest.TestCase):
                     for values in reconnected_capture_values
                 )
             )
-            self.assertEqual(
-                "streaming",
-                client.get("/api/cameras/sim-camera/status").json()["state"],
-            )
+            # A successful adapter capture reaches the browser only after the bounded JPEG
+            # publisher finishes its independent worker task. Assert the public recovery state,
+            # rather than racing that asynchronous handoff from an internal adapter observation.
+            status = wait_for_http_status(client, "sim-camera", "streaming")
+            self.assertEqual("streaming", status.json()["state"])
 
 
 if __name__ == "__main__":

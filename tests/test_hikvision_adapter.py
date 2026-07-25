@@ -168,6 +168,8 @@ class FakeMvsSdk:
     PixelType_Gvsp_RGB8_Packed = 2
     PixelType_BayerRG8 = 3
     PixelType_Gvsp_Mono10 = 4
+    MV_GrabStrategy_OneByOne = 10
+    MV_GrabStrategy_LatestImagesOnly = 11
     MV_FRAME_OUT = FakeFrameOut
     MV_CC_PIXEL_CONVERT_PARAM_EX = FakePixelConvertParams
 
@@ -183,6 +185,7 @@ class FakeNativeMvsCamera:
         height,
         converted_payload=None,
         conversion_length=None,
+        strategy_result=0,
     ):
         """Store deterministic frame metadata and an optional vendor-converted RGB payload."""
 
@@ -194,19 +197,39 @@ class FakeNativeMvsCamera:
         self.conversion_length = conversion_length
         self.source_buffer = None
         self.start_calls = 0
+        self.stop_calls = 0
         self.free_calls = 0
+        self.strategy_result = strategy_result
+        self.strategy_values = []
+        self.call_order = []
         self.conversion_destination_pixel_type = None
 
     def MV_CC_StartGrabbing(self):
         """Record acquisition start without changing camera configuration."""
 
         self.start_calls += 1
+        self.call_order.append("start")
+        return 0
+
+    def MV_CC_SetGrabStrategy(self, strategy):
+        """Record the strategy chosen before stream startup."""
+
+        self.strategy_values.append(strategy)
+        self.call_order.append("strategy")
+        return self.strategy_result
+
+    def MV_CC_StopGrabbing(self):
+        """Record recovery when strategy configuration rejects the active stream."""
+
+        self.stop_calls += 1
+        self.call_order.append("stop")
         return 0
 
     def MV_CC_GetImageBuffer(self, frame, timeout_ms):
         """Populate one ctypes frame structure with an MVS-owned source buffer."""
 
         del timeout_ms
+        self.call_order.append("get")
         self.source_buffer = (c_ubyte * len(self.source_payload))(*self.source_payload)
         frame.pBufAddr = cast(self.source_buffer, POINTER(c_ubyte))
         frame.stFrameInfo.nExtendWidth = self.width
@@ -239,10 +262,10 @@ class FakeNativeMvsCamera:
         return 0
 
 
-def create_native_client_for_frame(camera):
+def create_native_client_for_frame(camera, frame_delivery_mode="latest_only"):
     """Create an opened MVS client wired to ctypes fakes without importing vendor modules."""
 
-    client = MvsUsbCameraClient()
+    client = MvsUsbCameraClient(frame_delivery_mode=frame_delivery_mode)
     client._sdk = FakeMvsSdk()
     client._camera = camera
     client._opened = True
@@ -290,6 +313,36 @@ class HikvisionAdapterTests(unittest.TestCase):
             )
             self.assertFalse(adapter.connected)
             self.assertFalse(adapter.healthy)
+
+        self.run_async(scenario())
+
+    def test_frame_delivery_mode_defaults_to_latest_only_and_rejects_unknown_modes(self):
+        adapter = HikvisionAdapter("camera-a")
+
+        self.assertEqual("latest_only", adapter.frame_delivery_mode)
+        self.assertEqual(
+            "latest_only",
+            HikvisionAdapter.create_vendor_client(adapter.frame_delivery_mode).frame_delivery_mode,
+        )
+        self.assertEqual("sequential", MvsUsbCameraClient("sequential").frame_delivery_mode)
+        with self.assertRaisesRegex(ValueError, "frame_delivery_mode"):
+            HikvisionAdapter("camera-a", frame_delivery_mode="fifo")
+        with self.assertRaisesRegex(ValueError, "frame_delivery_mode"):
+            MvsUsbCameraClient("fifo")
+
+    def test_adapter_uses_one_worker_executor_and_releases_it_on_shutdown(self):
+        async def scenario():
+            client = FakeMvsUsbClient()
+            adapter = HikvisionAdapter("camera-a", client_factory=lambda: client)
+
+            await adapter.startup()
+            native_executor = adapter._native_executor
+            self.assertIsNotNone(native_executor)
+            self.assertEqual(1, native_executor._max_workers)
+            await adapter.capture()
+            await adapter.shutdown()
+
+            self.assertIsNone(adapter._native_executor)
 
         self.run_async(scenario())
 
@@ -503,6 +556,51 @@ class HikvisionAdapterTests(unittest.TestCase):
                 self.assertEqual(expected_format, frame.pixel_format)
                 self.assertEqual(1, camera.start_calls)
                 self.assertEqual(1, camera.free_calls)
+
+    def test_native_client_configures_latest_only_before_start_and_first_buffer(self):
+        camera = FakeNativeMvsCamera(
+            FakeMvsSdk.PixelType_Gvsp_Mono8,
+            b"\x00\xff",
+            2,
+            1,
+        )
+        client = create_native_client_for_frame(camera)
+
+        client.capture_frame(250)
+
+        self.assertEqual([FakeMvsSdk.MV_GrabStrategy_LatestImagesOnly], camera.strategy_values)
+        self.assertEqual(["strategy", "start", "get"], camera.call_order[:3])
+
+    def test_native_client_configures_explicit_sequential_delivery_before_start(self):
+        camera = FakeNativeMvsCamera(
+            FakeMvsSdk.PixelType_Gvsp_Mono8,
+            b"\x00\xff",
+            2,
+            1,
+        )
+        client = create_native_client_for_frame(camera, frame_delivery_mode="sequential")
+
+        client.capture_frame(250)
+
+        self.assertEqual([FakeMvsSdk.MV_GrabStrategy_OneByOne], camera.strategy_values)
+        self.assertEqual(["strategy", "start", "get"], camera.call_order[:3])
+
+    def test_native_client_rejects_strategy_failure_before_requesting_a_frame(self):
+        camera = FakeNativeMvsCamera(
+            FakeMvsSdk.PixelType_Gvsp_Mono8,
+            b"\x00\xff",
+            2,
+            1,
+            strategy_result=0x80000001,
+        )
+        client = create_native_client_for_frame(camera)
+
+        with self.assertRaisesRegex(MvsCameraClientError, "MV_CC_SetGrabStrategy"):
+            client.capture_frame(250)
+
+        self.assertEqual(["strategy"], camera.call_order)
+        self.assertEqual(0, camera.stop_calls)
+        self.assertEqual(0, camera.free_calls)
 
     def test_native_client_converts_high_bit_depth_monochrome_to_mono8(self):
         camera = FakeNativeMvsCamera(

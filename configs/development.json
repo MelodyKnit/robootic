@@ -9,11 +9,17 @@
     "vision": "simulated-camera",
     "plugins": {
       "perception": "deterministic-perception",
-      "planners": ["demonstration-planner"],
-      "observers": ["audit"]
+      "planners": [
+        "demonstration-planner"
+      ],
+      "observers": [
+        "audit"
+      ]
     }
   },
-  "camera_parameters": {},
+  "camera_parameters": {
+    "pixel_format": "RGB8"
+  },
   "targets": [
     {
       "name": "sim-primary",

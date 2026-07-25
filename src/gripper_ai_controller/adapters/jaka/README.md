@@ -1,6 +1,6 @@
 # JAKA 机器人适配器
 
-本包将 JAKA Python SDK 2.1.2 的同步接口转换为项目的 `RobotAdapter` 合约。它目前只支持安全连接、只读状态查询、显式使能和显式去使能；不支持任何关节、直线、伺服或其他运动指令。
+本包将 JAKA Python SDK 2.1.2 的同步接口转换为项目的 `RobotAdapter` 合约。它目前只支持安全连接、只读状态查询、只读关节角查询、显式使能和显式去使能；不支持任何关节、直线、伺服或其他运动指令。
 
 ## SDK 文件
 
@@ -10,6 +10,7 @@
 
 - `startup()` 只执行 `RC(controller_ip)` 和 `login()`；不会上电、使能或移动。
 - `initialize()` 与 `get_status()` 只读取 `get_robot_status()` 返回的遥测数据。
+- `get_joint_positions()` 只执行 SDK 的 `get_joint_position()`，返回带本机采集时间的 `JointPositionSnapshot`。`joint_positions_rad` 的六个值按 `J1` 至 `J6` 排列，单位为弧度；它们是关节空间坐标，不是六个实体关节在机器人基坐标系中的三维 `x/y/z` 位置。
 - `enable()` 不会调用 `power_on()`；只有 `allow_enable=True`、控制器已上电且未报告故障或急停时，才会调用 `enable_robot()`。
 - `execute()` 始终拒绝机器人运动指令，规划器和运行时无法绕过该限制。
 - `disable()` 是显式恢复动作；`shutdown()` 仅 `logout()`，不会隐式去使能或断电。
@@ -26,5 +27,15 @@ await adapter.startup()
 status = await adapter.initialize()
 await adapter.shutdown()
 ```
+
+## 一次性读取关节角
+
+将 `configs/jaka-hardware.example.json` 复制到 `localstore/`，填写本机控制器 IP 后，从子项目根目录执行：
+
+```powershell
+poetry run gripper-ai-controller jaka-joints --config-file localstore/jaka-hardware.local.json --target jaka-primary
+```
+
+该命令只启动选定的 JAKA 适配器，执行 `login -> get_joint_position -> logout`，随后在标准输出中给出 `J1` 至 `J6` 的弧度与角度制数值。它不会启动相机、夹爪、网页服务或运行时调度，也不会调用 `power_on()`、`enable_robot()`、`disable_robot()` 或任何运动接口。控制器未上电或未使能时，SDK 的只读错误会原样映射为命令失败；命令不会为读取数据而修改机械臂状态。
 
 真实使能前必须确认急停可用、机械臂工作区清空、控制器已人工上电且无人处于危险范围。使能后如需恢复到非使能状态，显式调用 `await adapter.disable()`。

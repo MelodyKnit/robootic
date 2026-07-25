@@ -1,5 +1,6 @@
 """Build the isolated vision-preview graph from an explicit JSON configuration."""
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -12,7 +13,12 @@ from gripper_ai_controller.bootstrap.runtime_builder import (
     required_mapping,
     required_string,
 )
+from gripper_ai_controller.bootstrap.pose_settings import (
+    build_pose_tracking_settings as _build_hardware_neutral_pose_settings,
+)
 from gripper_ai_controller.configuration import (
+    PoseTrackingSettings,
+    VisionAnalysisSettings,
     WebPreviewSettings,
     validate_camera_parameter_overrides,
 )
@@ -31,6 +37,16 @@ class VisionPreviewConfig:
     config_file: Optional[str] = None
     vision_name: Optional[str] = None
     vision_adapter_settings: Dict[str, Any] = field(default_factory=dict)
+    pose_settings: PoseTrackingSettings = field(default_factory=PoseTrackingSettings)
+    vision_analysis_settings: VisionAnalysisSettings = field(default_factory=VisionAnalysisSettings)
+
+
+@dataclass(frozen=True)
+class VisionEvaluationConfig:
+    """Offline model-evaluation settings that deliberately do not construct a camera adapter."""
+
+    pose_settings: PoseTrackingSettings
+    vision_analysis_settings: VisionAnalysisSettings
 
 
 def load_vision_preview_config(config_file: str) -> VisionPreviewConfig:
@@ -63,6 +79,22 @@ def load_vision_preview_config(config_file: str) -> VisionPreviewConfig:
         config_file=config_file,
         vision_name=vision_name,
         vision_adapter_settings=dict(vision_adapter_settings),
+        pose_settings=build_pose_tracking_settings(optional_mapping(payload, "pose")),
+        vision_analysis_settings=_build_vision_analysis_settings(
+            optional_mapping(payload, "vision_analysis")
+        ),
+    )
+
+
+def load_vision_evaluation_config(config_file: str) -> VisionEvaluationConfig:
+    """Load only pose and diagnostic settings for static images without opening any device."""
+
+    payload = load_json_config(config_file)
+    return VisionEvaluationConfig(
+        pose_settings=build_pose_tracking_settings(optional_mapping(payload, "pose")),
+        vision_analysis_settings=_build_vision_analysis_settings(
+            optional_mapping(payload, "vision_analysis")
+        ),
     )
 
 
@@ -96,6 +128,51 @@ def _build_web_settings(settings):
         jpeg_quality=jpeg_quality,
         capture_retry_seconds=retry_seconds,
         camera_controls_enabled=camera_controls_enabled,
+    )
+
+
+def build_pose_tracking_settings(settings):
+    """Validate reusable pose-tracking settings without loading model dependencies.
+
+    The offline image-centering simulator reuses the same hardware-neutral validator,
+    so model selection, target-joint validation, CUDA-only requirements, and local
+    weight-path rules stay identical to the browser preview path.
+    """
+
+    return _build_hardware_neutral_pose_settings(settings)
+
+
+def _build_vision_analysis_settings(settings):
+    """Validate passive image-quality thresholds without importing image or model libraries."""
+
+    allowed = {
+        "minimum_width",
+        "minimum_height",
+        "minimum_brightness",
+        "maximum_brightness",
+        "minimum_contrast",
+        "minimum_sharpness",
+        "sample_max_side",
+        "max_analysis_fps",
+    }
+    unknown = set(settings).difference(allowed)
+    if unknown:
+        raise ValueError(
+            "Unsupported vision_analysis settings: {0}.".format(", ".join(sorted(unknown)))
+        )
+    minimum_brightness = _number_setting(settings, "minimum_brightness", 20.0, 0.0, 255.0)
+    maximum_brightness = _number_setting(settings, "maximum_brightness", 235.0, 0.0, 255.0)
+    if minimum_brightness >= maximum_brightness:
+        raise ValueError("vision_analysis.minimum_brightness must be less than maximum_brightness.")
+    return VisionAnalysisSettings(
+        minimum_width=_integer_setting(settings, "minimum_width", 320, 1, 10000),
+        minimum_height=_integer_setting(settings, "minimum_height", 240, 1, 10000),
+        minimum_brightness=minimum_brightness,
+        maximum_brightness=maximum_brightness,
+        minimum_contrast=_number_setting(settings, "minimum_contrast", 8.0, 0.0, 255.0),
+        minimum_sharpness=_number_setting(settings, "minimum_sharpness", 5.0, 0.0, 1000000.0),
+        sample_max_side=_integer_setting(settings, "sample_max_side", 640, 32, 4096),
+        max_analysis_fps=_integer_setting(settings, "max_analysis_fps", 1, 1, 30),
     )
 
 
@@ -141,7 +218,12 @@ def _number_setting(settings, key, default, minimum, maximum):
     """Return one bounded numeric setting without accepting booleans."""
 
     value = settings.get(key, default)
-    if type(value) not in (int, float) or value < minimum or value > maximum:
+    if (
+        type(value) not in (int, float)
+        or not math.isfinite(value)
+        or value < minimum
+        or value > maximum
+    ):
         raise ValueError("web.{0} must be a number from {1} to {2}.".format(key, minimum, maximum))
     return float(value)
 

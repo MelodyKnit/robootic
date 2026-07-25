@@ -3,6 +3,7 @@
 import asyncio
 import math
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Tuple
 
@@ -102,12 +103,15 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapter):
         "HikvisionAdapter",
     )
 
+    _FRAME_DELIVERY_MODES = ("latest_only", "sequential")
+
     def __init__(
         self,
         camera_id: str,
         calibration_id: Optional[str] = None,
         camera_serial: Optional[str] = None,
         frame_timeout_ms: int = 1000,
+        frame_delivery_mode: str = "latest_only",
         client_factory: Optional[Callable[[], Any]] = None,
     ) -> None:
         """Store local camera selection and frame metadata without opening the device."""
@@ -117,15 +121,23 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapter):
             raise ValueError("Hikvision camera_id must be a non-empty string.")
         if frame_timeout_ms <= 0:
             raise ValueError("Hikvision frame_timeout_ms must be greater than zero.")
+        if frame_delivery_mode not in self._FRAME_DELIVERY_MODES:
+            raise ValueError(
+                "Hikvision frame_delivery_mode must be one of: {0}.".format(
+                    ", ".join(self._FRAME_DELIVERY_MODES)
+                )
+            )
         self.camera_id = camera_id
         self.calibration_id = calibration_id
         self.camera_serial = camera_serial
         self.frame_timeout_ms = frame_timeout_ms
-        self.client_factory = client_factory or self.create_vendor_client
+        self.frame_delivery_mode = frame_delivery_mode
+        self.client_factory = client_factory
         self._client = None  # type: Optional[Any]
         self._connected = False
         self._healthy = False
         self._capture_lock = None  # type: Optional[Any]
+        self._native_executor = None  # type: Optional[ThreadPoolExecutor]
 
     @property
     def connected(self) -> bool:
@@ -140,15 +152,19 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapter):
         return self._healthy
 
     @staticmethod
-    def create_vendor_client() -> MvsUsbCameraClient:
+    def create_vendor_client(frame_delivery_mode: str = "latest_only") -> MvsUsbCameraClient:
         """Create the lazy project-local MVS client without importing native code yet."""
 
-        return MvsUsbCameraClient()
+        return MvsUsbCameraClient(frame_delivery_mode=frame_delivery_mode)
 
     async def on_startup(self) -> None:
         """Open the selected MVS USB camera without starting acquisition or changing settings."""
 
-        self._client = self.client_factory()
+        self._client = (
+            self.client_factory()
+            if self.client_factory is not None
+            else self.create_vendor_client(self.frame_delivery_mode)
+        )
         try:
             await self._call_client_method("open_camera", self.camera_serial)
         except Exception as error:
@@ -157,6 +173,7 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapter):
             except Exception:
                 pass
             self._client = None
+            self._shutdown_native_executor()
             raise HikvisionAdapterError("Unable to open the configured Hikvision USB camera.") from error
         self._connected = True
         self._healthy = True
@@ -169,11 +186,15 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapter):
         that thread is still using the handle or its MVS-managed image buffer.
         """
 
-        if self._capture_lock is None:
-            await self._close_client()
-            return
-        async with self._capture_lock:
-            await self._close_client()
+        try:
+            if self._capture_lock is None:
+                await self._close_client()
+            else:
+                async with self._capture_lock:
+                    await self._close_client()
+        finally:
+            self._capture_lock = None
+            self._shutdown_native_executor()
 
     async def capture(self) -> ImageFrame:
         """Map one normalized MVS frame without running perception or saving files."""
@@ -271,7 +292,7 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapter):
         except AttributeError as error:
             raise HikvisionAdapterError("The Hikvision MVS client lacks {0}.".format(method_name)) from error
         loop = asyncio.get_event_loop()
-        future = loop.run_in_executor(None, method, *arguments)
+        future = loop.run_in_executor(self._native_executor_for_current_lifecycle(), method, *arguments)
         try:
             return await asyncio.shield(future)
         except asyncio.CancelledError:
@@ -400,6 +421,29 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapter):
         if self._capture_lock is None:
             self._capture_lock = asyncio.Lock()
         return self._capture_lock
+
+    def _native_executor_for_current_lifecycle(self) -> ThreadPoolExecutor:
+        """Return the one-worker executor that serializes all vendor SDK calls.
+
+        MVS manages camera handles and image buffers outside Python. A private, bounded executor
+        prevents capture, parameter reads, restart operations, and shutdown from competing with
+        unrelated default-executor work such as JPEG encoding or model inference.
+        """
+
+        if self._native_executor is None:
+            self._native_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="hikvision-mvs",
+            )
+        return self._native_executor
+
+    def _shutdown_native_executor(self) -> None:
+        """Join the dedicated MVS worker after serialized lifecycle cleanup completes."""
+
+        if self._native_executor is None:
+            return
+        self._native_executor.shutdown(wait=True)
+        self._native_executor = None
 
     async def _close_client(self) -> None:
         """Release the current client and state only after a serialized close attempt."""

@@ -3,12 +3,7 @@ import CameraPreview from './components/CameraPreview.vue'
 </script>
 
 <template>
-  <main class="preview-page">
-    <header class="page-header">
-      <p class="project-name">夹爪 AI 控制器</p>
-      <h1>相机预览</h1>
-    </header>
-
+  <main class="w-full h-screen overflow-hidden flex flex-col bg-slate-900">
     <CameraPreview />
   </main>
 </template>

@@ -1,22 +1,34 @@
 """Single-camera acquisition, controlled parameters, and MJPEG fan-out primitives."""
 
 import asyncio
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 import time
 from typing import Any, Dict, Mapping, Optional, Tuple
 
-from gripper_ai_controller.configuration import WebPreviewSettings
+from gripper_ai_controller.configuration import (
+    PoseTrackingSettings,
+    VisionAnalysisSettings,
+    WebPreviewSettings,
+)
 from gripper_ai_controller.domain.models import (
     CameraParameter,
     CameraParameterApplyMode,
     CameraParameterUpdateResult,
     CameraParameterValue,
+    ImageFrame,
 )
 from gripper_ai_controller.domain.ports import (
     CameraParameterAdapter,
     CameraParameterError,
     VisionAdapter,
 )
-from gripper_ai_controller.web.codec import JpegFrameEncoder
+from gripper_ai_controller.pose.config_store import PoseTargetConfigStore, PoseTargetConfigStoreError
+from gripper_ai_controller.pose.models import COCO_KEYPOINT_NAMES, PoseTrackingSnapshot
+from gripper_ai_controller.pose.tracker import PoseTargetError, PoseTrackingService
+from gripper_ai_controller.vision.analysis import VisionAnalysisService
+from gripper_ai_controller.vision.models import VisionAnalysisSnapshot
+from gripper_ai_controller.web.codec import FrameEncodingError, JpegFrameEncoder
 from gripper_ai_controller.web.config_store import (
     CameraParameterConfigStore,
     CameraParameterConfigStoreError,
@@ -25,6 +37,7 @@ from gripper_ai_controller.web.models import (
     CameraPreviewError,
     CameraPreviewStatus,
     EncodedFrame,
+    PosePreviewSnapshot,
 )
 
 
@@ -48,6 +61,14 @@ class CameraParameterRestoreError(RuntimeError):
     """Report a configured parameter replay failure before browser frames are acquired."""
 
 
+class PoseTrackingCapabilityError(RuntimeError):
+    """Report that the configured preview graph does not include pose tracking."""
+
+
+class PoseTargetPersistenceError(RuntimeError):
+    """Report that a valid in-memory target could not be saved to local configuration."""
+
+
 _PERSISTED_PARAMETER_DEPENDENCIES = {
     "exposure_time_us": ("exposure_auto", "Off"),
     "gain_db": ("gain_auto", "Off"),
@@ -57,7 +78,7 @@ _PERSISTED_PARAMETER_DEPENDENCIES = {
 
 
 class FrameHub:
-    """Store only the latest JPEG and wake every waiting browser stream subscriber."""
+    """Fan out the latest JPEG and retain a tiny cache for in-flight pose inference frames."""
 
     def __init__(self, camera_id: str) -> None:
         """Create an empty frame cache for one configured camera identifier."""
@@ -68,14 +89,28 @@ class FrameHub:
         # condition is created lazily by the first asynchronous operation instead.
         self._condition = None  # type: Optional[Any]
         self._latest_frame = None  # type: Optional[EncodedFrame]
+        self._pose_frames = OrderedDict()
         self._state = "starting"
         self._error = None  # type: Optional[CameraPreviewError]
 
-    async def publish(self, jpeg_payload: bytes, captured_at: float) -> EncodedFrame:
-        """Replace the cached frame and notify every stream waiting for a newer image."""
+    async def publish(
+        self, jpeg_payload: bytes, captured_at: float, retain_for_pose: bool = False
+    ) -> EncodedFrame:
+        """Replace the live JPEG and retain only model-dispatched frames for pose rendering.
+
+        At most one Keypoint R-CNN task is in flight. Keeping three JPEGs from accepted
+        tasks therefore covers the latest completed result, its replacement candidate,
+        and a brief browser poll delay without turning the preview into a frame archive.
+        """
 
         async with self._condition_for_current_loop():
-            self._latest_frame = EncodedFrame(captured_at, jpeg_payload)
+            frame = EncodedFrame(captured_at, jpeg_payload)
+            self._latest_frame = frame
+            if retain_for_pose:
+                self._pose_frames[captured_at] = frame
+                self._pose_frames.move_to_end(captured_at)
+                while len(self._pose_frames) > 3:
+                    self._pose_frames.popitem(last=False)
             self._state = "streaming"
             self._error = None
             self._condition.notify_all()
@@ -101,6 +136,12 @@ class FrameHub:
 
         async with self._condition_for_current_loop():
             return self._latest_frame
+
+    async def pose_frame_at(self, captured_at: float) -> Optional[EncodedFrame]:
+        """Return a bounded JPEG captured for one accepted pose inference task only."""
+
+        async with self._condition_for_current_loop():
+            return self._pose_frames.get(captured_at)
 
     async def wait_for_frame(self, previous_frame: Optional[EncodedFrame]) -> Optional[EncodedFrame]:
         """Wait until a different cached JPEG exists or the preview service stops.
@@ -137,6 +178,90 @@ class FrameHub:
         return self._condition
 
 
+class LatestJpegPublisher:
+    """Encode and publish at most one active and one newest pending browser frame."""
+
+    def __init__(self, encoder: JpegFrameEncoder, hub: FrameHub) -> None:
+        """Bind a single-worker encoder to the shared in-memory browser frame hub."""
+
+        self._encoder = encoder
+        self._hub = hub
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jpeg-encoder")
+        self._task = None  # type: Optional[asyncio.Task]
+        self._pending = None  # type: Optional[Tuple[ImageFrame, bool]]
+        self._lock = None  # type: Optional[Any]
+
+    async def submit(self, frame: ImageFrame, retain_for_pose: bool) -> None:
+        """Queue the frame only when it is the most recent unavailable-to-encode source."""
+
+        async with self._lock_for_current_loop():
+            if self._task is not None and not self._task.done():
+                self._pending = (frame, retain_for_pose)
+                return
+            self._pending = None
+            self._task = asyncio.create_task(self._encode_and_publish(frame, retain_for_pose))
+
+    async def shutdown(self) -> None:
+        """Drain at most the active encode before releasing the dedicated executor."""
+
+        async with self._lock_for_current_loop():
+            self._pending = None
+            task = self._task
+        if task is not None:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._executor.shutdown(wait=True)
+
+    async def _encode_and_publish(self, frame: ImageFrame, retain_for_pose: bool) -> None:
+        """Run bounded native JPEG work and replace queued sources after every completion."""
+
+        current_frame = frame
+        current_retain_for_pose = retain_for_pose
+        while True:
+            try:
+                jpeg_payload = await asyncio.get_event_loop().run_in_executor(
+                    self._executor,
+                    self._encoder.encode,
+                    current_frame,
+                )
+            except (FrameEncodingError, ValueError, OSError):
+                await self._hub.mark_degraded(
+                    CameraPreviewError(
+                        "camera_unavailable",
+                        "Camera preview is temporarily unavailable and will retry automatically.",
+                    )
+                )
+            except Exception:
+                await self._hub.mark_degraded(
+                    CameraPreviewError(
+                        "camera_unavailable",
+                        "Camera preview is temporarily unavailable and will retry automatically.",
+                    )
+                )
+            else:
+                await self._hub.publish(
+                    jpeg_payload,
+                    current_frame.captured_at,
+                    retain_for_pose=current_retain_for_pose,
+                )
+
+            async with self._lock_for_current_loop():
+                if self._pending is None:
+                    self._task = None
+                    return
+                current_frame, current_retain_for_pose = self._pending
+                self._pending = None
+
+    def _lock_for_current_loop(self) -> Any:
+        """Create the internal scheduling lock only after an asyncio loop exists."""
+
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
+
+
 class CameraPreviewService:
     """Own one vision lifecycle, controlled parameter boundary, and shared capture loop.
 
@@ -152,6 +277,9 @@ class CameraPreviewService:
         settings: WebPreviewSettings,
         camera_parameter_overrides: Optional[Mapping[str, CameraParameterValue]] = None,
         parameter_store: Optional[CameraParameterConfigStore] = None,
+        pose_tracking_service: Optional[PoseTrackingService] = None,
+        pose_target_store: Optional[PoseTargetConfigStore] = None,
+        vision_analysis_service: Optional[VisionAnalysisService] = None,
     ) -> None:
         """Bind one configured vision adapter, settings, and optional JSON overrides.
 
@@ -165,11 +293,20 @@ class CameraPreviewService:
         self.settings = settings
         self.encoder = JpegFrameEncoder(settings.jpeg_quality)
         self.hub = FrameHub(camera_id)
+        self._jpeg_publisher = LatestJpegPublisher(self.encoder, self.hub)
         self._capture_task = None  # type: Optional[asyncio.Task]
         self._operation_lock = None  # type: Optional[Any]
         self._camera_parameter_overrides = dict(camera_parameter_overrides or {})
         self._parameter_store = parameter_store
         self._camera_parameter_overrides_restored = False
+        self.pose_tracking_service = pose_tracking_service
+        self._pose_target_store = pose_target_store
+        self.vision_analysis_service = vision_analysis_service or VisionAnalysisService(
+            camera_id,
+            VisionAnalysisSettings(),
+            PoseTrackingSettings(),
+            pose_tracking_service,
+        )
 
     async def startup(self) -> None:
         """Begin the single shared acquisition task without starting any execution runtime.
@@ -200,6 +337,10 @@ class CameraPreviewService:
             except asyncio.CancelledError:
                 pass
         try:
+            if self.pose_tracking_service is not None:
+                await self.pose_tracking_service.shutdown()
+            await self.vision_analysis_service.shutdown()
+            await self._jpeg_publisher.shutdown()
             async with self._operation_lock_for_current_loop():
                 await self.vision.shutdown()
         finally:
@@ -276,11 +417,85 @@ class CameraPreviewService:
                     "Unable to apply the requested camera parameter update."
                 ) from error
 
+    async def get_pose_snapshot(self) -> PoseTrackingSnapshot:
+        """Return latest pose metadata without starting an inference or camera operation."""
+
+        if self.pose_tracking_service is None:
+            return PoseTrackingSnapshot(
+                self.camera_id,
+                None,
+                False,
+                "Pose tracking is disabled by the current preview configuration.",
+                "right_wrist",
+                None,
+                None,
+                None,
+                0,
+            )
+        return await self.pose_tracking_service.snapshot()
+
+    async def get_pose_preview_snapshot(self) -> PosePreviewSnapshot:
+        """Pair current pose output with the latest browser frame for bounded overlay use."""
+
+        snapshot = await self.get_pose_snapshot()
+        latest_frame = await self.hub.latest_frame()
+        latest_frame_at = None if latest_frame is None else latest_frame.captured_at
+        maximum_lag = 0.35
+        if self.pose_tracking_service is not None:
+            maximum_lag = self.pose_tracking_service.settings.overlay_max_frame_lag_seconds
+        frame_lag = None
+        if snapshot.captured_at is not None and latest_frame_at is not None:
+            frame_lag = latest_frame_at - snapshot.captured_at
+        # A selected joint can be unavailable while the remaining detected skeleton is
+        # still valuable for visual diagnostics. Lock validity remains a separate gate.
+        overlay_fresh = bool(
+            snapshot.person is not None
+            and frame_lag is not None
+            and 0.0 <= frame_lag <= maximum_lag
+        )
+        return PosePreviewSnapshot(snapshot, latest_frame_at, overlay_fresh)
+
+    async def get_pose_frame(self, captured_at: float) -> Optional[EncodedFrame]:
+        """Return a cache-only JPEG for the pose result's exact source-frame timestamp."""
+
+        if self.pose_tracking_service is None:
+            return None
+        return await self.hub.pose_frame_at(captured_at)
+
+    async def get_vision_analysis_snapshot(self) -> VisionAnalysisSnapshot:
+        """Return cached frame health and pose-derived recognition metadata without new work."""
+
+        return await self.vision_analysis_service.snapshot()
+
+    async def update_pose_target(self, target_joint: str) -> PoseTrackingSnapshot:
+        """Persist a browser target selection before applying it to the live pose tracker."""
+
+        if self.pose_tracking_service is None:
+            raise PoseTrackingCapabilityError("Pose tracking is disabled by the current preview configuration.")
+        if target_joint not in COCO_KEYPOINT_NAMES:
+            # Reject invalid input before any local JSON write so the API can return 422.
+            raise PoseTargetError("The requested pose target joint is not supported.")
+        if self._pose_target_store is None:
+            raise PoseTargetPersistenceError(
+                "Pose target updates require an explicit local configuration store."
+            )
+        try:
+            event_loop = asyncio.get_event_loop()
+            await event_loop.run_in_executor(
+                None, self._pose_target_store.persist_target_joint, target_joint
+            )
+            return await self.pose_tracking_service.set_target_joint(target_joint)
+        except PoseTargetError:
+            raise
+        except (PoseTargetConfigStoreError, OSError, ValueError) as error:
+            raise PoseTargetPersistenceError("The selected pose target could not be saved locally.") from error
+        except Exception as error:
+            raise PoseTargetPersistenceError("The selected pose target could not be saved locally.") from error
+
     async def _capture_loop(self) -> None:
         """Acquire, encode, and publish frames at the configured bounded rate."""
 
         interval_seconds = 1.0 / self.settings.stream_fps
-        event_loop = asyncio.get_event_loop()
         while True:
             started_at = time.monotonic()
             try:
@@ -288,8 +503,11 @@ class CameraPreviewService:
                     await self.vision.startup()
                     await self._restore_camera_parameter_overrides()
                     frame = await self.vision.capture()
-                jpeg_payload = await event_loop.run_in_executor(None, self.encoder.encode, frame)
-                await self.hub.publish(jpeg_payload, frame.captured_at)
+                await self.vision_analysis_service.record_frame(frame)
+                pose_frame_scheduled = False
+                if self.pose_tracking_service is not None:
+                    pose_frame_scheduled = await self.pose_tracking_service.submit_frame(frame)
+                await self._jpeg_publisher.submit(frame, pose_frame_scheduled)
             except asyncio.CancelledError:
                 raise
             except CameraParameterRestoreError:

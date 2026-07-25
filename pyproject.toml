@@ -11,6 +11,9 @@ dependencies = [
     "fastapi==0.99.1",
     "uvicorn==0.22.0",
     "Pillow==9.5.0",
+    "numpy==1.21.6",
+    "torch==1.13.1",
+    "torchvision==0.14.1",
 ]
 
 [project.scripts]
@@ -37,10 +40,19 @@ cbor = "1.0.0"
 fastapi = "0.99.1"
 uvicorn = "0.22.0"
 Pillow = "9.5.0"
+numpy = "1.21.6"
+torch = { version = "1.13.1", source = "pytorch-cu117" }
+torchvision = { version = "0.14.1", source = "pytorch-cu117" }
 
 [tool.poetry.group.dev.dependencies]
 # FastAPI's TestClient uses this only in the offline HTTP contract test suite.
 httpx = "0.24.1"
+
+
+[[tool.poetry.source]]
+name = "pytorch-cu117"
+url = "https://download.pytorch.org/whl/cu117"
+priority = "explicit"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Optional
 
+from gripper_ai_controller.pose.models import PoseTrackingSnapshot
+
 
 @dataclass(frozen=True)
 class EncodedFrame:
@@ -28,3 +30,12 @@ class CameraPreviewStatus:
     state: str
     latest_frame_at: Optional[float]
     error: Optional[CameraPreviewError]
+
+
+@dataclass(frozen=True)
+class PosePreviewSnapshot:
+    """Pose metadata paired with the browser JPEG timestamp used for overlay freshness."""
+
+    snapshot: PoseTrackingSnapshot
+    latest_frame_at: Optional[float]
+    overlay_fresh: bool

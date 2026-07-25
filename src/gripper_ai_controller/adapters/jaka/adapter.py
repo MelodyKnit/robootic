@@ -2,10 +2,18 @@
 
 import asyncio
 import importlib
+import math
+import time
 from typing import Any, Callable, Optional, Sequence, Tuple
 
 from gripper_ai_controller.adapters.base import BaseAdapter
-from gripper_ai_controller.domain.models import ComponentManifest, Pose3D, RobotCommand, RobotStatus
+from gripper_ai_controller.domain.models import (
+    ComponentManifest,
+    JointPositionSnapshot,
+    Pose3D,
+    RobotCommand,
+    RobotStatus,
+)
 from gripper_ai_controller.domain.ports import RobotAdapter
 
 
@@ -23,9 +31,9 @@ class JakaAdapter(BaseAdapter, RobotAdapter):
 
     manifest = ComponentManifest(
         "jaka-robot",
-        "0.1.0",
+        "0.2.0",
         "robot",
-        ("robot", "jaka", "connect", "explicit-enable", "motion-disabled"),
+        ("robot", "jaka", "connect", "joint-position-read", "explicit-enable", "motion-disabled"),
         "JakaAdapter",
     )
 
@@ -148,6 +156,22 @@ class JakaAdapter(BaseAdapter, RobotAdapter):
             enabled=self._enabled,
         )
 
+    async def get_joint_positions(self) -> JointPositionSnapshot:
+        """Read J1 through J6 directly from the documented read-only JAKA SDK call.
+
+        The returned values are controller joint angles in radians. This method does
+        not read or change power, servo-enable, motion, or controller configuration.
+        """
+
+        self.ensure_started()
+        joint_positions = self.require_vector(
+            "joint positions",
+            self.require_payload(
+                "get_joint_position", await self.call_vendor("get_joint_position")
+            ),
+        )
+        return JointPositionSnapshot(time.time(), joint_positions)
+
     async def get_sdk_version(self) -> str:
         """Return the read-only SDK version reported by the connected controller."""
 
@@ -241,4 +265,7 @@ class JakaAdapter(BaseAdapter, RobotAdapter):
 
         if not isinstance(values, Sequence) or len(values) != 6:
             raise JakaAdapterError("JAKA {0} must contain exactly six values.".format(name))
-        return tuple(float(value) for value in values)  # type: ignore
+        normalized = tuple(float(value) for value in values)
+        if not all(math.isfinite(value) for value in normalized):
+            raise JakaAdapterError("JAKA {0} must contain only finite values.".format(name))
+        return normalized  # type: ignore

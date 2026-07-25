@@ -1,0 +1,40 @@
+{
+  "pose": {
+    "enabled": true,
+    "model": "torchvision-keypoint-rcnn-resnet50-fpn",
+    "weights_path": "localstore/models/keypointrcnn_resnet50_fpn_coco.pth",
+    "device": "cuda",
+    "inference_max_side": 768,
+    "max_inference_fps": 2,
+    "torch_cpu_threads": 2,
+    "torch_interop_threads": 1,
+    "overlay_max_frame_lag_seconds": 0.35,
+    "person_confidence_threshold": 0.8,
+    "joint_confidence_threshold": 0.6,
+    "lost_after_frames": 3,
+    "target_joint": "right_wrist",
+    "tracking_min_iou": 0.2,
+    "tracking_max_center_distance": 0.25,
+    "motion_speed_threshold": 0.04,
+    "motion_max_interval_seconds": 1.5,
+    "draw_skeleton": true
+  },
+  "simulation": {
+    "fixture_id": "full-body-front",
+    "pixel_format": "mono8",
+    "desired_normalized": [0.5, 0.5],
+    "center_deadband": 0.025,
+    "maximum_pose_age_seconds": 1.0,
+    "maximum_joint_step_rad": 0.08,
+    "gain": 0.85,
+    "damping": 0.1,
+    "maximum_iterations": 20,
+    "initial_joint_positions_rad": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "joint_lower_limits_rad": [-2.8, -1.5, -2.0, -2.8, -2.0, -3.1],
+    "joint_upper_limits_rad": [2.8, 1.5, 2.0, 2.8, 2.0, 3.1],
+    "image_jacobian": [
+      [-0.52, 0.0, 0.0, -0.1, 0.0, 0.0],
+      [0.0, -0.42, -0.18, 0.0, -0.08, 0.0]
+    ]
+  }
+}

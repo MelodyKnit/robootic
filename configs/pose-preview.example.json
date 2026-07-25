@@ -1,0 +1,48 @@
+{
+  "camera": {
+    "camera_id": "sim-camera",
+    "calibration_id": "sim-camera-calibration",
+    "mounting": "fixed"
+  },
+  "components": {
+    "vision": "simulated-camera"
+  },
+  "web": {
+    "bind_host": "0.0.0.0",
+    "port": 8000,
+    "frontend_dist_dir": "src/web/dist",
+    "stream_fps": 10,
+    "jpeg_quality": 80,
+    "capture_retry_seconds": 1.0,
+    "camera_controls_enabled": false
+  },
+  "pose": {
+    "enabled": false,
+    "model": "torchvision-keypoint-rcnn-resnet50-fpn",
+    "device": "cuda",
+    "inference_max_side": 768,
+    "max_inference_fps": 2,
+    "torch_cpu_threads": 2,
+    "torch_interop_threads": 1,
+    "overlay_max_frame_lag_seconds": 0.35,
+    "person_confidence_threshold": 0.8,
+    "joint_confidence_threshold": 0.6,
+    "lost_after_frames": 3,
+    "target_joint": "right_wrist",
+    "tracking_min_iou": 0.2,
+    "tracking_max_center_distance": 0.25,
+    "motion_speed_threshold": 0.04,
+    "motion_max_interval_seconds": 1.5,
+    "draw_skeleton": true
+  },
+  "vision_analysis": {
+    "minimum_width": 320,
+    "minimum_height": 240,
+    "minimum_brightness": 20.0,
+    "maximum_brightness": 235.0,
+    "minimum_contrast": 8.0,
+    "minimum_sharpness": 5.0,
+    "sample_max_side": 640,
+    "max_analysis_fps": 1
+  }
+}

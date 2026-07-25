@@ -42,6 +42,104 @@ export interface CameraParameterUpdateResult extends CameraParameters {
   restartedAcquisition: boolean
 }
 
+export interface PoseJoint {
+  name: string
+  xPx: number
+  yPx: number
+  normalizedX: number
+  normalizedY: number
+  confidence: number
+}
+
+export interface PoseBoundingBox {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface HumanPose {
+  cameraId: string
+  capturedAt: number
+  boundingBox: PoseBoundingBox
+  confidence: number
+  joints: PoseJoint[]
+}
+
+/** Passive motion metadata for the selected 2D target joint between two valid frames. */
+export interface PoseMotion {
+  previousCapturedAt: number
+  capturedAt: number
+  targetJoint: string
+  deltaX: number
+  deltaY: number
+  displacement: number
+  velocityX: number
+  velocityY: number
+  speed: number
+  moving: boolean
+}
+
+export interface PoseTracking {
+  cameraId: string
+  enabled: boolean
+  capturedAt: number | null
+  latestFrameAt: number | null
+  overlayFresh: boolean
+  valid: boolean
+  reason: string
+  targetJoint: string
+  target: PoseJoint | null
+  person: HumanPose | null
+  inferenceLatencyMs: number | null
+  lostFrames: number
+  motion: PoseMotion | null
+  drawSkeleton: boolean
+}
+
+export type JointVisibilityState = 'detected' | 'low_confidence' | 'out_of_frame' | 'unavailable'
+
+export interface FrameQuality {
+  capturedAt: number
+  valid: boolean
+  width: number | null
+  height: number | null
+  pixelFormat: string | null
+  brightnessMean: number | null
+  contrast: number | null
+  sharpness: number | null
+  warnings: string[]
+}
+
+export interface PersonDetection {
+  boundingBox: PoseBoundingBox
+  confidence: number
+  selected: boolean
+}
+
+export interface JointVisibility {
+  name: string
+  state: JointVisibilityState
+  confidence: number
+  normalizedX: number
+  normalizedY: number
+}
+
+export interface VisionAnalysis {
+  cameraId: string
+  frameCapturedAt: number | null
+  inferenceCapturedAt: number | null
+  poseEnabled: boolean
+  valid: boolean
+  reason: string
+  frame: FrameQuality | null
+  personCount: number
+  persons: PersonDetection[]
+  selectedPerson: HumanPose | null
+  jointVisibility: JointVisibility[]
+  visibleJointNames: string[]
+}
+
 interface CameraListResponse {
   cameras: CameraStatus[]
 }
@@ -52,7 +150,7 @@ interface ApiErrorResponse {
 }
 
 interface JsonRequestOptions {
-  method?: 'GET' | 'PATCH' | 'POST'
+  method?: 'GET' | 'PATCH' | 'POST' | 'PUT'
   body?: unknown
   signal?: AbortSignal
 }
@@ -60,6 +158,9 @@ interface JsonRequestOptions {
 const allowedStates: CameraState[] = ['starting', 'streaming', 'degraded', 'stopped']
 const allowedParameterKinds: CameraParameterKind[] = ['float', 'enum', 'boolean']
 const allowedApplyModes: CameraParameterApplyMode[] = ['live', 'restart']
+const allowedJointVisibilityStates: JointVisibilityState[] = [
+  'detected', 'low_confidence', 'out_of_frame', 'unavailable',
+]
 
 /**
  * Represents a rejected HTTP request with the stable error details returned by
@@ -93,7 +194,7 @@ function parseCameraStatus(payload: unknown): CameraStatus {
     throw new CameraApiError(502, 'invalid_response', '相机服务返回了无效状态。')
   }
 
-  const value = payload as Record<string, unknown>
+  const value = payload as unknown as Record<string, unknown>
   if (
     typeof value.camera_id !== 'string' ||
     !allowedStates.includes(value.state as CameraState) ||
@@ -181,6 +282,210 @@ function parseCameraParameter(payload: unknown): CameraParameter {
   }
 }
 
+/** Converts one pose API result into bounded values suitable for Canvas rendering. */
+function parsePoseTracking(payload: unknown): PoseTracking {
+  if (typeof payload !== 'object' || payload === null) {
+    throw new CameraApiError(502, 'invalid_response', '人体姿态响应无效。')
+  }
+
+  const value = payload as Record<string, unknown>
+  const rawMotion = value.motion === undefined ? null : value.motion
+  // These additive fields are optional while a browser is upgraded ahead of the
+  // preview service. Missing values deliberately suppress an unsafe stale overlay.
+  const latestFrameAt = value.latest_frame_at === undefined ? null : value.latest_frame_at
+  const overlayFresh = value.overlay_fresh === undefined ? false : value.overlay_fresh
+  if (
+    typeof value.camera_id !== 'string' ||
+    typeof value.enabled !== 'boolean' ||
+    !isNullableNumber(value.captured_at) ||
+    !isNullableNumber(latestFrameAt) ||
+    typeof overlayFresh !== 'boolean' ||
+    typeof value.valid !== 'boolean' ||
+    typeof value.reason !== 'string' ||
+    typeof value.target_joint !== 'string' ||
+    !isNullablePoseJoint(value.target) ||
+    !isNullableHumanPose(value.person) ||
+    !isNullableNumber(value.inference_latency_ms) ||
+    !isNonNegativeInteger(value.lost_frames) ||
+    !isNullablePoseMotion(rawMotion) ||
+    typeof value.draw_skeleton !== 'boolean'
+  ) {
+    throw new CameraApiError(502, 'invalid_response', '人体姿态响应不完整。')
+  }
+
+  return {
+    cameraId: value.camera_id,
+    enabled: value.enabled,
+    capturedAt: value.captured_at as number | null,
+    latestFrameAt: latestFrameAt as number | null,
+    overlayFresh,
+    valid: value.valid,
+    reason: value.reason,
+    targetJoint: value.target_joint,
+    target: value.target === null ? null : parsePoseJoint(value.target),
+    person: value.person === null ? null : parseHumanPose(value.person),
+    inferenceLatencyMs: value.inference_latency_ms as number | null,
+    lostFrames: value.lost_frames,
+    motion: rawMotion === null ? null : parsePoseMotion(rawMotion),
+    drawSkeleton: value.draw_skeleton,
+  }
+}
+
+/** Converts one cached analysis payload without accepting raw pixels or model tensors. */
+function parseVisionAnalysis(payload: unknown): VisionAnalysis {
+  if (typeof payload !== 'object' || payload === null) {
+    throw new CameraApiError(502, 'invalid_response', '视觉分析响应无效。')
+  }
+
+  const value = payload as Record<string, unknown>
+  if (
+    typeof value.camera_id !== 'string' ||
+    !isNullableNumber(value.frame_captured_at) ||
+    !isNullableNumber(value.inference_captured_at) ||
+    typeof value.pose_enabled !== 'boolean' ||
+    typeof value.valid !== 'boolean' ||
+    typeof value.reason !== 'string' ||
+    !isNullableFrameQuality(value.frame) ||
+    !isNonNegativeInteger(value.person_count) ||
+    !Array.isArray(value.persons) ||
+    !value.persons.every(isPersonDetection) ||
+    !isNullableHumanPose(value.selected_person) ||
+    !Array.isArray(value.joint_visibility) ||
+    !value.joint_visibility.every(isJointVisibility) ||
+    !Array.isArray(value.visible_joint_names) ||
+    !value.visible_joint_names.every((name) => typeof name === 'string')
+  ) {
+    throw new CameraApiError(502, 'invalid_response', '视觉分析响应不完整。')
+  }
+  if (value.person_count !== value.persons.length) {
+    throw new CameraApiError(502, 'invalid_response', '视觉分析人数统计不一致。')
+  }
+
+  return {
+    cameraId: value.camera_id,
+    frameCapturedAt: value.frame_captured_at as number | null,
+    inferenceCapturedAt: value.inference_captured_at as number | null,
+    poseEnabled: value.pose_enabled,
+    valid: value.valid,
+    reason: value.reason,
+    frame: value.frame === null ? null : parseFrameQuality(value.frame),
+    personCount: value.person_count as number,
+    persons: (value.persons as unknown[]).map(parsePersonDetection),
+    selectedPerson: value.selected_person === null ? null : parseHumanPose(value.selected_person),
+    jointVisibility: (value.joint_visibility as unknown[]).map(parseJointVisibility),
+    visibleJointNames: value.visible_joint_names as string[],
+  }
+}
+
+/** Maps a validated normalized box to the frontend data contract. */
+function parseBoundingBox(payload: unknown): PoseBoundingBox {
+  const box = payload as Record<string, unknown>
+  return {
+    x: box.x as number,
+    y: box.y as number,
+    width: box.width as number,
+    height: box.height as number,
+  }
+}
+
+/** Converts passive image-quality diagnostics from the latest cached frame. */
+function parseFrameQuality(payload: unknown): FrameQuality {
+  const value = payload as Record<string, unknown>
+  return {
+    capturedAt: value.captured_at as number,
+    valid: value.valid as boolean,
+    width: value.width as number | null,
+    height: value.height as number | null,
+    pixelFormat: value.pixel_format as string | null,
+    brightnessMean: value.brightness_mean as number | null,
+    contrast: value.contrast as number | null,
+    sharpness: value.sharpness as number | null,
+    warnings: value.warnings as string[],
+  }
+}
+
+/** Converts one person box derived from the existing Keypoint R-CNN inference output. */
+function parsePersonDetection(payload: unknown): PersonDetection {
+  const value = payload as Record<string, unknown>
+  return {
+    boundingBox: parseBoundingBox(value.bounding_box),
+    confidence: value.confidence as number,
+    selected: value.selected as boolean,
+  }
+}
+
+/** Converts one named joint visibility state. */
+function parseJointVisibility(payload: unknown): JointVisibility {
+  const value = payload as Record<string, unknown>
+  return {
+    name: value.name as string,
+    state: value.state as JointVisibilityState,
+    confidence: value.confidence as number,
+    normalizedX: value.normalized_x as number,
+    normalizedY: value.normalized_y as number,
+  }
+}
+
+/** Validates one person pose while keeping model-specific tensors out of the UI. */
+function parseHumanPose(payload: unknown): HumanPose {
+  if (!isHumanPose(payload)) {
+    throw new CameraApiError(502, 'invalid_response', '人体姿态数据无效。')
+  }
+
+  const value = payload as unknown as Record<string, unknown>
+  const boundingBox = value.bounding_box as Record<string, unknown>
+  return {
+    cameraId: value.camera_id as string,
+    capturedAt: value.captured_at as number,
+    boundingBox: {
+      x: boundingBox.x as number,
+      y: boundingBox.y as number,
+      width: boundingBox.width as number,
+      height: boundingBox.height as number,
+    },
+    confidence: value.confidence as number,
+    joints: (value.joints as unknown[]).map(parsePoseJoint),
+  }
+}
+
+/** Converts an API joint object after type and coordinate range validation. */
+function parsePoseJoint(payload: unknown): PoseJoint {
+  if (!isPoseJoint(payload)) {
+    throw new CameraApiError(502, 'invalid_response', '人体关节点数据无效。')
+  }
+
+  const value = payload as unknown as Record<string, unknown>
+  return {
+    name: value.name as string,
+    xPx: value.x_px as number,
+    yPx: value.y_px as number,
+    normalizedX: value.normalized_x as number,
+    normalizedY: value.normalized_y as number,
+    confidence: value.confidence as number,
+  }
+}
+
+/** Maps bounded normalized image-space motion without assigning physical units. */
+function parsePoseMotion(payload: unknown): PoseMotion {
+  if (!isPoseMotion(payload)) {
+    throw new CameraApiError(502, 'invalid_response', '人体运动追踪数据无效。')
+  }
+
+  const value = payload as unknown as Record<string, unknown>
+  return {
+    previousCapturedAt: value.previous_captured_at as number,
+    capturedAt: value.captured_at as number,
+    targetJoint: value.target_joint as string,
+    deltaX: value.delta_x as number,
+    deltaY: value.delta_y as number,
+    displacement: value.displacement as number,
+    velocityX: value.velocity_x as number,
+    velocityY: value.velocity_y as number,
+    speed: value.speed as number,
+    moving: value.moving as boolean,
+  }
+}
+
 function isParameterValueForKind(value: unknown, kind: CameraParameterKind): value is CameraParameterValue {
   if (kind === 'float') {
     return typeof value === 'number' && Number.isFinite(value)
@@ -193,6 +498,158 @@ function isParameterValueForKind(value: unknown, kind: CameraParameterKind): val
 
 function isNullableNumber(value: unknown): value is number | null {
   return value === null || (typeof value === 'number' && Number.isFinite(value))
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0
+}
+
+function isNullablePositiveInteger(value: unknown): value is number | null {
+  return value === null || (typeof value === 'number' && Number.isInteger(value) && value > 0)
+}
+
+function isNullablePoseJoint(value: unknown): value is PoseJoint | null {
+  return value === null || isPoseJoint(value)
+}
+
+function isNullablePoseMotion(value: unknown): value is PoseMotion | null {
+  return value === null || isPoseMotion(value)
+}
+
+function isPoseMotion(value: unknown): value is PoseMotion {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+
+  const motion = value as Record<string, unknown>
+  return (
+    isFiniteNumber(motion.previous_captured_at) &&
+    isFiniteNumber(motion.captured_at) &&
+    motion.captured_at > motion.previous_captured_at &&
+    typeof motion.target_joint === 'string' &&
+    isFiniteNumber(motion.delta_x) &&
+    isFiniteNumber(motion.delta_y) &&
+    isNonNegativeFiniteNumber(motion.displacement) &&
+    isFiniteNumber(motion.velocity_x) &&
+    isFiniteNumber(motion.velocity_y) &&
+    isNonNegativeFiniteNumber(motion.speed) &&
+    typeof motion.moving === 'boolean'
+  )
+}
+
+function isPoseJoint(value: unknown): value is PoseJoint {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+
+  const joint = value as Record<string, unknown>
+  return (
+    typeof joint.name === 'string' &&
+    isFiniteNumber(joint.x_px) &&
+    isFiniteNumber(joint.y_px) &&
+    isNormalizedCoordinate(joint.normalized_x) &&
+    isNormalizedCoordinate(joint.normalized_y) &&
+    isNormalizedCoordinate(joint.confidence)
+  )
+}
+
+function isNullableHumanPose(value: unknown): value is HumanPose | null {
+  return value === null || isHumanPose(value)
+}
+
+function isNullableFrameQuality(value: unknown): value is FrameQuality | null {
+  return value === null || isFrameQuality(value)
+}
+
+function isFrameQuality(value: unknown): value is FrameQuality {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const quality = value as Record<string, unknown>
+  return (
+    isFiniteNumber(quality.captured_at) &&
+    typeof quality.valid === 'boolean' &&
+    isNullablePositiveInteger(quality.width) &&
+    isNullablePositiveInteger(quality.height) &&
+    (quality.pixel_format === null || typeof quality.pixel_format === 'string') &&
+    isNullableNumber(quality.brightness_mean) &&
+    isNullableNumber(quality.contrast) &&
+    isNullableNumber(quality.sharpness) &&
+    Array.isArray(quality.warnings) &&
+    quality.warnings.every((warning) => typeof warning === 'string')
+  )
+}
+
+function isPersonDetection(value: unknown): value is PersonDetection {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const person = value as Record<string, unknown>
+  return (
+    isPoseBoundingBox(person.bounding_box) &&
+    isNormalizedCoordinate(person.confidence) &&
+    typeof person.selected === 'boolean'
+  )
+}
+
+function isJointVisibility(value: unknown): value is JointVisibility {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const joint = value as Record<string, unknown>
+  return (
+    typeof joint.name === 'string' &&
+    allowedJointVisibilityStates.includes(joint.state as JointVisibilityState) &&
+    isNormalizedCoordinate(joint.confidence) &&
+    isNormalizedCoordinate(joint.normalized_x) &&
+    isNormalizedCoordinate(joint.normalized_y)
+  )
+}
+
+function isHumanPose(value: unknown): value is HumanPose {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+
+  const person = value as Record<string, unknown>
+  if (
+    typeof person.camera_id !== 'string' ||
+    !isFiniteNumber(person.captured_at) ||
+    !isNormalizedCoordinate(person.confidence) ||
+    !Array.isArray(person.joints) ||
+    !person.joints.every(isPoseJoint) ||
+    typeof person.bounding_box !== 'object' ||
+    person.bounding_box === null
+  ) {
+    return false
+  }
+
+  return isPoseBoundingBox(person.bounding_box)
+}
+
+function isPoseBoundingBox(value: unknown): value is PoseBoundingBox {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const box = value as Record<string, unknown>
+  return (
+    isNormalizedCoordinate(box.x) &&
+    isNormalizedCoordinate(box.y) &&
+    isNormalizedCoordinate(box.width) &&
+    isNormalizedCoordinate(box.height)
+  )
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function isNonNegativeFiniteNumber(value: unknown): value is number {
+  return isFiniteNumber(value) && value >= 0
+}
+
+function isNormalizedCoordinate(value: unknown): value is number {
+  return isFiniteNumber(value) && value >= 0 && value <= 1
 }
 
 function isNullableCameraError(value: unknown): value is CameraError | null {
@@ -280,6 +737,27 @@ export async function applyRestartCameraParameters(
     body: { values },
   })
   return parseCameraParameters(payload, true) as CameraParameterUpdateResult
+}
+
+/** Retrieves the latest cached single-person pose without initiating GPU inference. */
+export async function getCameraPose(cameraId: string, signal?: AbortSignal): Promise<PoseTracking> {
+  const payload = await requestJson(`/api/cameras/${encodeURIComponent(cameraId)}/pose`, { signal })
+  return parsePoseTracking(payload)
+}
+
+/** Persists and selects one supported COCO target joint for the active pose tracker. */
+export async function updatePoseTarget(cameraId: string, targetJoint: string): Promise<PoseTracking> {
+  const payload = await requestJson(`/api/cameras/${encodeURIComponent(cameraId)}/pose/target`, {
+    method: 'PUT',
+    body: { target_joint: targetJoint },
+  })
+  return parsePoseTracking(payload)
+}
+
+/** Retrieves cached image quality and human analysis without starting a new inference. */
+export async function getCameraVisionAnalysis(cameraId: string, signal?: AbortSignal): Promise<VisionAnalysis> {
+  const payload = await requestJson(`/api/cameras/${encodeURIComponent(cameraId)}/vision/analysis`, { signal })
+  return parseVisionAnalysis(payload)
 }
 
 /** Returns the MJPEG endpoint that a native image element can keep open. */

@@ -11,6 +11,14 @@
 - `shutdown()`：先等待正在执行的原生取帧返回，再按停止取流、关闭设备、销毁句柄、反初始化 SDK 的顺序释放资源。关闭请求最多受当前 `frame_timeout_ms` 与底层 SDK 返回时间影响，不能并发释放正在被 MVS 调用使用的句柄。
 - 未配置 `camera_serial` 时，只有枚举到一台 MVS USB 相机才允许打开；存在多台设备时必须从本机私有配置指定序列号。
 
+默认 `frame_delivery_mode` 为 `latest_only`。每次 MVS 相机句柄打开且开始取流前，适配器会设置 `MV_GrabStrategy_LatestImagesOnly`，使后续取帧丢弃等待队列中的旧图像并优先交付当前画面。已连接 USB 相机在开始取流后设置该策略会返回调用顺序错误，因此该设置失败会阻止本次取流并报告相机错误，不会静默回退为 FIFO。`sequential` 仅为未来离线逐帧任务保留；它显式使用 `MV_GrabStrategy_OneByOne`，不能用于低延迟网页预览。适配器所有原生 MVS 调用共用一个专用单工作线程，避免 SDK 取帧、节点操作和关闭过程与网页的其它后台任务争用默认线程池。
+
+## 低延迟排查
+
+`web.stream_fps` 是网页采集循环的上限，不会强制相机以该帧率输出。`latest_only` 只能丢弃 FIFO 中的历史帧，确保浏览器拿到最新图像；它不能提高传感器、触发模式或 USB 链路的实际帧率。排查卡顿时，应以 MVS 的 `ResultingFrameRate` 为准，而不是只看 `AcquisitionFrameRate`：后者只有在 `AcquisitionFrameRateEnable` 开启时才是有效限制。
+
+以 `2448 x 2048 Mono10Packed` 为例，单帧约为 `5.98 MiB`；约 `5 FPS` 的数据量接近 USB 2.0 High-Speed 的实际有效吞吐。若 Windows 或 MVS 显示设备协商到 High-Speed，应先将相机直连已知的 USB 3.x SuperSpeed 主机端口，使用合格的短 USB 3.x 数据线，并绕过 USB 2.0 集线器、显示器扩展口和带宽受限的扩展坞，再重新插拔设备使链路重新协商。不要在网页服务启动时自动修改 `TransferSize`、`TransferWays`、触发模式、曝光或像素格式；这些实验必须由操作者在单项、可回退的授权下进行。
+
 ## 配置
 
 受版本控制的 [配置模板](../../../../../configs/hikvision-usb.example.json) 不包含真实序列号或标定数据。将模板复制到 `localstore/` 后填入相机序列号和真实标定标识，再通过显式 `--config-file` 传入运行时。

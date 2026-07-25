@@ -2,13 +2,32 @@
 
 import argparse
 import asyncio
+import json
+import math
+from pathlib import Path
 from dataclasses import replace
 
-from gripper_ai_controller.bootstrap.runtime_builder import build_runtime
+from gripper_ai_controller.pose.estimator import (
+    PoseEstimatorError,
+    TorchvisionKeypointRcnnEstimator,
+    download_keypoint_rcnn_weights,
+)
+from gripper_ai_controller.pose.gpu import inspect_cuda_gpu
+from gripper_ai_controller.vision.analysis import JointVisibilityEvaluator
+from gripper_ai_controller.vision.fixtures import (
+    VisionFixtureManifestError,
+    evaluation_report,
+    evaluate_fixture,
+    load_vision_fixtures,
+    render_fixture_overlay,
+)
+from gripper_ai_controller.vision.quality import FrameQualityInspector
 
 
 async def _run(args: argparse.Namespace) -> None:
     """Run one objective from an explicit JSON configuration and release resources."""
+
+    from gripper_ai_controller.bootstrap.runtime_builder import build_runtime
 
     runtime = build_runtime(args.config_file)
     await runtime.startup()
@@ -25,6 +44,8 @@ async def _run(args: argparse.Namespace) -> None:
 async def _reload(args: argparse.Namespace) -> None:
     """Reload a development runtime rebuilt from the same explicit JSON file."""
 
+    from gripper_ai_controller.bootstrap.runtime_builder import build_runtime
+
     runtime = build_runtime(args.config_file)
     await runtime.startup()
     try:
@@ -33,6 +54,52 @@ async def _reload(args: argparse.Namespace) -> None:
         print("Reloaded: {0}".format(", ".join(modules)))
     finally:
         await runtime.shutdown()
+
+
+async def _read_jaka_joint_positions(args: argparse.Namespace) -> None:
+    """Connect only to one configured JAKA target and print its current joint angles."""
+
+    from gripper_ai_controller.adapters.jaka import JakaAdapter
+    from gripper_ai_controller.bootstrap.runtime_builder import load_runtime_config
+
+    configuration = load_runtime_config(args.config_file)
+    candidates = [target for target in configuration.targets if isinstance(target.robot, JakaAdapter)]
+    if args.target is not None:
+        candidates = [target for target in candidates if target.name == args.target]
+        if not candidates:
+            raise ValueError("No JAKA target named '{0}' exists in the supplied configuration.".format(args.target))
+    if len(candidates) != 1:
+        raise ValueError(
+            "The supplied configuration must contain exactly one selected JAKA target; "
+            "use --target when it contains multiple JAKA targets."
+        )
+
+    target = candidates[0]
+    adapter = target.robot
+    await adapter.startup()
+    try:
+        snapshot = await adapter.get_joint_positions()
+    finally:
+        await adapter.shutdown()
+
+    values = snapshot.joint_positions_rad
+    print(
+        json.dumps(
+            {
+                "target_name": target.name,
+                "captured_at": snapshot.captured_at,
+                "joint_positions_rad": {
+                    "J{0}".format(index + 1): value for index, value in enumerate(values)
+                },
+                "joint_positions_deg": {
+                    "J{0}".format(index + 1): math.degrees(value)
+                    for index, value in enumerate(values)
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 def _web(args: argparse.Namespace) -> None:
@@ -59,6 +126,173 @@ def _web(args: argparse.Namespace) -> None:
     uvicorn.run(application, host=settings.bind_host, port=settings.port)
 
 
+def _gpu_check(args: argparse.Namespace) -> None:
+    """Print read-only CUDA evidence and fail only when the caller requires runtime readiness."""
+
+    result = inspect_cuda_gpu()
+    print(json.dumps(result.as_dict(), ensure_ascii=False, indent=2))
+    if not result.cuda_driver_compatible:
+        raise RuntimeError("CUDA 11.7-compatible NVIDIA driver is required before pose dependency installation.")
+    if args.require_torch and not result.ready_for_pose_inference:
+        raise RuntimeError("Pinned CUDA Torch runtime is not ready for pose inference.")
+
+
+def _download_pose_weights(args: argparse.Namespace) -> None:
+    """Download model weights only to an explicit localstore-relative path."""
+
+    path = Path(args.weights_file)
+    if path.is_absolute() or ".." in path.parts or not path.parts or path.parts[0] != "localstore":
+        raise ValueError("--weights-file must be a localstore-relative path without parent traversal.")
+    try:
+        saved_path = download_keypoint_rcnn_weights(args.weights_file)
+    except PoseEstimatorError as error:
+        raise RuntimeError(str(error))
+    print("Downloaded Keypoint R-CNN weights: {0}".format(saved_path))
+
+
+def _vision_evaluate(args: argparse.Namespace) -> None:
+    """Evaluate public local image fixtures without constructing a camera or control runtime."""
+
+    from gripper_ai_controller.bootstrap.preview_builder import load_vision_evaluation_config
+
+    configuration = load_vision_evaluation_config(args.config_file)
+    if not configuration.pose_settings.enabled:
+        raise RuntimeError("pose.enabled must be true for vision-evaluate.")
+    preflight = inspect_cuda_gpu()
+    if not preflight.ready_for_pose_inference:
+        raise RuntimeError("CUDA pose inference is not ready: {0}".format(preflight.reason))
+    try:
+        fixtures = load_vision_fixtures(args.fixture_manifest)
+    except VisionFixtureManifestError as error:
+        raise RuntimeError(str(error))
+    estimator = TorchvisionKeypointRcnnEstimator(
+        configuration.pose_settings.weights_path,
+        configuration.pose_settings.device,
+        configuration.pose_settings.inference_max_side,
+        configuration.pose_settings.torch_cpu_threads,
+        configuration.pose_settings.torch_interop_threads,
+    )
+    quality_inspector = FrameQualityInspector(configuration.vision_analysis_settings)
+    visibility_evaluator = JointVisibilityEvaluator(
+        configuration.pose_settings.joint_confidence_threshold
+    )
+    evaluations = []
+    for fixture in fixtures:
+        for pixel_format in ("rgb8", "mono8"):
+            try:
+                evaluation = evaluate_fixture(
+                    fixture,
+                    pixel_format,
+                    estimator,
+                    quality_inspector,
+                    visibility_evaluator,
+                    configuration.pose_settings.person_confidence_threshold,
+                )
+            except (PoseEstimatorError, VisionFixtureManifestError) as error:
+                raise RuntimeError("Fixture '{0}' could not be evaluated: {1}".format(fixture.fixture_id, error))
+            evaluations.append(evaluation)
+
+    report = evaluation_report(evaluations)
+    report["model"] = configuration.pose_settings.model
+    report["device"] = configuration.pose_settings.device
+    report_text = json.dumps(report, ensure_ascii=False, indent=2)
+    if args.report_file is not None:
+        report_path = _temporary_output_path(args.report_file, "--report-file")
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report_text + "\n", encoding="utf-8")
+    if args.save_overlays:
+        overlay_directory = _temporary_output_path(args.overlay_dir, "--overlay-dir")
+        overlay_directory.mkdir(parents=True, exist_ok=True)
+        for evaluation in evaluations:
+            fixture = next(item for item in fixtures if item.fixture_id == evaluation.fixture_id)
+            render_fixture_overlay(
+                fixture,
+                evaluation,
+                str(overlay_directory / "{0}-{1}.png".format(evaluation.fixture_id, evaluation.pixel_format)),
+            )
+    print(report_text)
+    if not report["passed"]:
+        raise RuntimeError("One or more vision fixtures did not meet their documented acceptance criteria.")
+
+
+def _image_centering_simulate(args: argparse.Namespace) -> None:
+    """Run a CUDA-backed, static-image visual-servo simulation without any hardware graph."""
+
+    from gripper_ai_controller.image_servo_simulation.configuration import (
+        load_image_servo_simulation_config,
+    )
+    from gripper_ai_controller.image_servo_simulation.runner import (
+        ImageServoInputError,
+        render_console_report,
+        run_static_image_centering,
+        select_image_target,
+    )
+    from gripper_ai_controller.vision.fixtures import (
+        VisionFixtureManifestError,
+        load_fixture_frame,
+        load_vision_fixtures,
+    )
+
+    configuration = load_image_servo_simulation_config(args.config_file)
+    preflight = inspect_cuda_gpu()
+    if not preflight.ready_for_pose_inference:
+        raise RuntimeError("CUDA pose inference is not ready: {0}".format(preflight.reason))
+    try:
+        fixtures = load_vision_fixtures(args.fixture_manifest)
+    except VisionFixtureManifestError as error:
+        raise RuntimeError(str(error))
+    fixture = next(
+        (item for item in fixtures if item.fixture_id == configuration.simulation_settings.fixture_id),
+        None,
+    )
+    if fixture is None:
+        raise RuntimeError(
+            "The configured fixture_id was not found in the local vision fixture manifest."
+        )
+    frame = load_fixture_frame(fixture, configuration.simulation_settings.pixel_format)
+    estimator = TorchvisionKeypointRcnnEstimator(
+        configuration.pose_settings.weights_path,
+        configuration.pose_settings.device,
+        configuration.pose_settings.inference_max_side,
+        configuration.pose_settings.torch_cpu_threads,
+        configuration.pose_settings.torch_interop_threads,
+    )
+    try:
+        target = select_image_target(
+            estimator.infer(frame),
+            frame.camera_id,
+            frame.captured_at,
+            configuration.pose_settings.target_joint,
+            configuration.pose_settings.person_confidence_threshold,
+            configuration.pose_settings.joint_confidence_threshold,
+        )
+    except (ImageServoInputError, PoseEstimatorError) as error:
+        raise RuntimeError("Image-centering simulation cannot start: {0}".format(error))
+    result = run_static_image_centering(configuration.simulation_settings, target)
+    print(render_console_report(result))
+    if not result.centered:
+        raise RuntimeError("Image-centering simulation did not converge: {0}".format(result.reason))
+
+
+def _temporary_output_path(value: str, argument_name: str) -> Path:
+    """Restrict generated reports and overlays to the project temporary artifact area."""
+
+    path = Path(value)
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or len(path.parts) < 2
+        or path.parts[0] != "temp"
+        or path.parts[1] != "gripper-ai-controller"
+    ):
+        raise ValueError(
+            "{0} must be a relative path below temp/gripper-ai-controller without parent traversal.".format(
+                argument_name
+            )
+        )
+    return path
+
+
 def main() -> None:
     """Parse commands without creating a physical device connection."""
 
@@ -70,17 +304,58 @@ def main() -> None:
     reload_command = subparsers.add_parser("reload", help="Explicitly reload development modules.")
     reload_command.add_argument("--config-file", default="configs/development.json")
     reload_command.add_argument("--module", action="append")
+    jaka_joints = subparsers.add_parser(
+        "jaka-joints",
+        help="Read current JAKA J1-J6 angles without enabling or moving the robot.",
+    )
+    jaka_joints.add_argument("--config-file", required=True)
+    jaka_joints.add_argument("--target")
     web = subparsers.add_parser("web", help="Run the isolated camera preview web service.")
     web.add_argument("--config-file", default="configs/development.json")
     web.add_argument("--host")
     web.add_argument("--port", type=int)
     web.add_argument("--frontend-dist-dir")
+    gpu_check = subparsers.add_parser("gpu-check", help="Inspect CUDA readiness without loading a pose model.")
+    gpu_check.add_argument("--require-torch", action="store_true")
+    weights = subparsers.add_parser(
+        "pose-download-weights",
+        help="Explicitly download official Keypoint R-CNN weights into localstore.",
+    )
+    weights.add_argument("--weights-file", required=True)
+    evaluation = subparsers.add_parser(
+        "vision-evaluate",
+        help="Evaluate local public-image fixtures without opening a camera or control runtime.",
+    )
+    evaluation.add_argument("--config-file", required=True)
+    evaluation.add_argument("--fixture-manifest", default="data/vision-fixtures/manifest.json")
+    evaluation.add_argument("--report-file")
+    evaluation.add_argument("--save-overlays", action="store_true")
+    evaluation.add_argument(
+        "--overlay-dir",
+        default="temp/gripper-ai-controller/vision-evaluation/overlays",
+    )
+    image_centering = subparsers.add_parser(
+        "image-centering-simulate",
+        help="Run a static-image virtual camera-arm centering simulation without hardware.",
+    )
+    image_centering.add_argument("--config-file", required=True)
+    image_centering.add_argument("--fixture-manifest", default="data/vision-fixtures/manifest.json")
     args = parser.parse_args()
     if args.command is None:
         args.command = "run"
         args.config_file = "configs/development.json"
         args.objective = "Pick the detected workpiece"
-    if args.command == "reload":
+    if args.command == "gpu-check":
+        _gpu_check(args)
+    elif args.command == "pose-download-weights":
+        _download_pose_weights(args)
+    elif args.command == "vision-evaluate":
+        _vision_evaluate(args)
+    elif args.command == "image-centering-simulate":
+        _image_centering_simulate(args)
+    elif args.command == "jaka-joints":
+        asyncio.run(_read_jaka_joint_positions(args))
+    elif args.command == "reload":
         asyncio.run(_reload(args))
     elif args.command == "web":
         _web(args)

@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "fixtures": [
+    {
+      "id": "full-body-front",
+      "file": "images/full-body-front.jpg",
+      "source_url": "https://images.nasa.gov/details/b60-00708",
+      "author": "NASA",
+      "license": "Public Domain",
+      "sha256": "0e83d4ee487238b3fd7a9a725f4c832b407b531d81f33e9dcd0af7af89c69ed6",
+      "minimum_person_count": 1,
+      "maximum_person_count": 1,
+      "minimum_visible_joints": 6,
+      "required_visible_joints": ["left_shoulder", "right_shoulder", "left_hip", "right_hip", "right_wrist"],
+      "required_quality_warnings": [],
+      "manual_review": "确认主人体框覆盖站立飞行员，且肩、髋、膝、踝和右手腕等完整身体关节与原图对齐。"
+    },
+    {
+      "id": "upper-body",
+      "file": "images/upper-body.jpg",
+      "source_url": "https://images.nasa.gov/details/KSC-03pd2895",
+      "author": "NASA",
+      "license": "Public Domain",
+      "sha256": "666ef548836ea5b58ec3fd403278c6d7a67e54ca3e78b9007b0571cd96f1473a",
+      "minimum_person_count": 1,
+      "maximum_person_count": 1,
+      "minimum_visible_joints": 3,
+      "required_visible_joints": ["left_shoulder", "right_shoulder"],
+      "required_quality_warnings": [],
+      "manual_review": "确认人物框覆盖前景上半身，并将画面外的髋、膝、踝标为画面外或低置信度。"
+    },
+    {
+      "id": "occluded-side",
+      "file": "images/occluded-side.jpg",
+      "source_url": "https://images.nasa.gov/details/sts085-339-006",
+      "author": "NASA",
+      "license": "Public Domain",
+      "sha256": "f9a2948bed9953954ffe710fa150d97f3bafbf7f68502ca68f152ab94d9488dc",
+      "minimum_person_count": 1,
+      "maximum_person_count": 1,
+      "minimum_visible_joints": 2,
+      "required_visible_joints": [],
+      "required_quality_warnings": [],
+      "manual_review": "确认侧身且被航天器设备遮挡的人体不会把不可见下肢错误标记为高置信度。"
+    },
+    {
+      "id": "no-person",
+      "file": "images/no-person.jpg",
+      "source_url": "https://images.nasa.gov/details/PIA19820",
+      "author": "NASA",
+      "license": "Public Domain",
+      "sha256": "7626d1de2694bdff4d7ac8fce0cc62ff632d1ef8ddb9f248eeba0ce499f7e895",
+      "minimum_person_count": 0,
+      "maximum_person_count": 0,
+      "minimum_visible_joints": 0,
+      "required_visible_joints": [],
+      "required_quality_warnings": [],
+      "manual_review": "确认火星地形不会产生有效人体框、骨架或锁定关节。"
+    },
+    {
+      "id": "low-light",
+      "file": "images/low-light.jpg",
+      "source_url": "https://images.nasa.gov/details/iss033e014856",
+      "author": "NASA",
+      "license": "Public Domain",
+      "sha256": "80601d105507698a3be035c41cc8d6d49971b7e3c6e713d8bcccbf4c0622a226",
+      "minimum_person_count": 0,
+      "maximum_person_count": 0,
+      "minimum_visible_joints": 0,
+      "required_visible_joints": [],
+      "required_quality_warnings": ["brightness_low"],
+      "manual_review": "确认夜间地球影像产生亮度偏低警告，且不会产生有效人体目标。"
+    }
+  ]
+}

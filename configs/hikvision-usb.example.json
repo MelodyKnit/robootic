@@ -11,7 +11,8 @@
       "camera_id": "hikvision-usb",
       "calibration_id": "replace-with-local-calibration-id",
       "camera_serial": "replace-with-local-camera-serial",
-      "frame_timeout_ms": 1000
+      "frame_timeout_ms": 1000,
+      "frame_delivery_mode": "latest_only"
     },
     "plugins": {
       "perception": "deterministic-perception",

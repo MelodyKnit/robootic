@@ -1,57 +1,38 @@
 # 相机预览前端
 
-本目录是夹爪 AI 控制器的 Vue 3 + TypeScript 前端工程。它显示 FastAPI 相机预览服务提供的状态和 MJPEG 图像流，并在后端本机开关允许时显示受限相机参数控件；不包含机械臂、夹爪或运行时指令调度能力。
+本目录是 Vite、Vue 3 和 TypeScript 构建的相机预览界面。主画面始终显示连续 MJPEG，并在服务器确认姿态来源帧仍足够新鲜时，用 Canvas 叠加服务器已计算的人体 2D 骨架和成像分析；它不会为了姿态结果替换为静态 JPEG。它不会直接导入海康 SDK，也没有机器人、夹爪或运动控制接口。
 
-## 运行环境
+## 结构
 
-- Node.js 20 或更高版本
-- pnpm 10
-- 后端相机预览服务已通过项目的 `web` CLI 子命令启动
+- `src/api/camera.ts`：相机、参数、姿态和成像分析 HTTP 契约校验。
+- `src/composables/useCameraPreview.ts`：相机状态轮询与 MJPEG 重连。
+- `src/composables/usePoseTracking.ts`：姿态快照轮询与目标关节选择。
+- `src/composables/useVisionAnalysis.ts`：只读成像质量与人员识别缓存轮询。
+- `src/components/PoseSkeletonOverlay.vue`：按照图片实际显示尺寸绘制人体框、骨架和锁定关节的 Canvas 覆盖层。
+- `src/components/PoseTargetPanel.vue`：COCO 关节选择和锁定状态面板。
+- `src/components/VisionAnalysisPanel.vue`：帧质量、检测人数、主人体框和 17 关节可见性面板。
 
-## 开发
+骨架坐标由后端以相对于原始帧宽高的归一化数值提供。Canvas 会按连续 MJPEG 在 `object-contain` 盒内实际可见的像素矩形绘制，因此黑边、窗口缩放或相机画面比例变化都不会把骨架投射到图像外。只有 `/pose` 的 `overlay_fresh` 为真时才绘制，过期时隐藏叠加但视频不中断。`/pose/frame` 是后端诊断接口，不参与主画面切换。
 
-在本目录执行：
-
-```powershell
-pnpm install
-pnpm dev
-```
-
-开发服务器绑定 `0.0.0.0:5173`，并将 `/api` 转发至 `http://127.0.0.1:8000`。如后端使用其他地址，可在启动前设置 `VITE_API_PROXY_TARGET`。构建后的文件由 FastAPI 直接提供，不需要浏览器跨域配置。
+## 开发与构建
 
 ```powershell
-pnpm build
+pnpm --dir src/web install
+pnpm --dir src/web typecheck
+pnpm --dir src/web build
+pnpm --dir src/web dev
 ```
 
-构建产物位于 `dist/`，不参与 Git 提交。
+开发服务器通过 Vite 代理访问本机 FastAPI 的 `/api`。构建后的 `dist/` 由 FastAPI 静态托管，不参与 Git 提交。
 
-## 后端接口
+## 姿态交互
 
-页面使用以下预览接口：
+页面只轮询 `GET /api/cameras/{camera_id}/pose` 的最新结果；它不会使相机重新取帧或触发新的 GPU 推理。用户切换下拉框时，页面调用 `PUT /api/cameras/{camera_id}/pose/target`。后端会先校验 COCO 关节名，再原子保存到显式本机配置，最后更新内存中的追踪状态。
 
-- `GET /api/cameras` 返回 `{ "cameras": [...] }`；
-- `GET /api/cameras/{camera_id}/status` 返回一个相机状态；
-- `GET /api/cameras/{camera_id}/stream` 返回 MJPEG 图像流。
+当新鲜帧中存在人体姿态时，页面绘制人体框和可用关节骨架；即使所选锁定关节暂时低置信度，其他已检测关节仍会显示。`valid` 仅表示所选关节是否满足锁定和后续跟随资格，并控制目标高亮，不是整个人体骨架的显示条件。姿态功能未启用、未检测到人体或结果过期时，页面保留相机画面但不绘制旧骨架。该界面仅用于视觉验证，不代表可驱动机械臂的坐标结果。
 
-相机参数区域使用以下受控接口：
+## 成像与识别面板
 
-- `GET /api/cameras/{camera_id}/parameters` 获取设备当前支持的参数及范围；
-- `PATCH /api/cameras/{camera_id}/parameters/{parameter_key}` 立即应用曝光、增益、帧率等 `live` 参数；设备成功后后端会将实际生效值写回显式配置的 `camera_parameters`；
-- `POST /api/cameras/{camera_id}/parameters/apply` 提交 `restart` 参数并由后端停止、写入、更新配置和恢复采集。
+页面轮询 `GET /api/cameras/{camera_id}/vision/analysis` 的服务器缓存。它显示图像格式、尺寸、亮度、对比度、清晰度、人数、主人体框和 COCO 17 关节状态；Canvas 使用与 MJPEG 相同的归一化坐标，并受 `/pose` 的新鲜度校验保护，因此缩放时保持对齐且不会绘制过期骨架。
 
-相机状态字段为 `camera_id`、`state`、`latest_frame_at` 和 `error`，页面不显示帧序号。`state` 只能为 `starting`、`streaming`、`degraded` 或 `stopped`；`error` 为 `null` 或包含 `code`、`message` 的对象。当前界面只支持一台已配置相机。
-
-浮点参数使用滑动条和数值输入，滑块释放或数值提交后立即请求后端。自动曝光、自动增益和帧率开关会禁用相应的手动控件。像素格式等 `restart` 参数只保存在页面草稿中，直到操作者点击“保存并重新采集”；设备成功更新后，后端才会把实际生效值写入启动时显式传入 JSON 的 `camera_parameters`。若配置写回失败，页面应显示设备已生效但配置未保存的错误，操作者修复本机配置后重新提交。服务启动或相机重连后会在首帧前恢复已保存参数；浏览器刷新只重新读取后端状态，不会重置设备或配置。所有参数范围和枚举选项均来自后端实际设备响应，不在前端写死。
-
-## 浏览器验收
-
-先启动后端预览服务，再执行：
-
-```powershell
-pnpm exec playwright install chromium
-pnpm test:e2e
-```
-
-默认测试访问 `http://127.0.0.1:8000`。可通过 `CAMERA_PREVIEW_BASE_URL` 覆盖测试地址。验收截图保存到已忽略的项目根 `temp/gripper-ai-controller/`；失败诊断产物保存在本目录已忽略的 `playwright-report/` 与 `test-results/`。
-
-局域网部署不提供认证；仅可在受信任网络中使用。`camera_controls_enabled` 默认关闭；开启后，同一受信任网络中的访问者可修改后端白名单内的相机参数，不能直接暴露到互联网。网页永远不提供机器人或夹爪控制。
+该轮询不打开第二条视频流、不修改相机参数，也不请求新的模型推理。姿态禁用时仍可显示帧健康；未检测到人、低置信度、画面外和相机不可用均由状态面板直接区分。

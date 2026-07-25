@@ -63,8 +63,22 @@ class MvsUsbCameraClient:
     in the reverse lifecycle order.
     """
 
-    def __init__(self) -> None:
-        """Create a client with no loaded SDK module or allocated camera resource."""
+    _FRAME_DELIVERY_MODES = ("latest_only", "sequential")
+
+    def __init__(self, frame_delivery_mode: str = "latest_only") -> None:
+        """Create a client with no loaded SDK module or allocated camera resource.
+
+        ``latest_only`` is the interactive-preview default. MVS discards queued frames before
+        each delivery so a slow consumer sees the current camera image instead of a FIFO backlog.
+        ``sequential`` remains available for an explicit future offline, frame-by-frame workflow.
+        """
+
+        if frame_delivery_mode not in self._FRAME_DELIVERY_MODES:
+            raise ValueError(
+                "MVS frame_delivery_mode must be one of: {0}.".format(
+                    ", ".join(self._FRAME_DELIVERY_MODES)
+                )
+            )
 
         self._sdk = None  # type: Optional[Any]
         self._camera = None  # type: Optional[Any]
@@ -72,6 +86,13 @@ class MvsUsbCameraClient:
         self._handle_created = False
         self._opened = False
         self._grabbing = False
+        self._frame_delivery_mode = frame_delivery_mode
+
+    @property
+    def frame_delivery_mode(self) -> str:
+        """Return the configured MVS frame-delivery policy without querying the camera."""
+
+        return self._frame_delivery_mode
 
     def open_camera(self, camera_serial: Optional[str]) -> None:
         """Open one locally selected USB camera without changing camera parameters."""
@@ -185,11 +206,18 @@ class MvsUsbCameraClient:
                 self._require_success("MV_CC_FreeImageBuffer", self._camera.MV_CC_FreeImageBuffer(frame))
 
     def start_grabbing(self) -> None:
-        """Start the current device acquisition only when it is not already running."""
+        """Configure delivery and start acquisition before any frame buffer is requested.
+
+        The connected USB camera returns ``MV_E_CALLORDER`` if its grab strategy is changed after
+        ``MV_CC_StartGrabbing``. Applying the strategy while the handle is open but inactive keeps
+        the first ``MV_CC_GetImageBuffer`` on the selected latest-only or sequential policy and
+        permits the same setup after a parameter update restarts acquisition.
+        """
 
         self._require_open_camera()
         if self._grabbing:
             return
+        self._configure_frame_delivery_mode()
         self._require_success("MV_CC_StartGrabbing", self._camera.MV_CC_StartGrabbing())
         self._grabbing = True
 
@@ -280,6 +308,35 @@ class MvsUsbCameraClient:
             "MV_CC_SetBoolValue({0})".format(node_name),
             self._camera.MV_CC_SetBoolValue(node_name, bool(value)),
         )
+
+    def _configure_frame_delivery_mode(self) -> None:
+        """Apply the selected MVS grab strategy while the opened stream is inactive.
+
+        This method intentionally fails closed. The connected USB model also rejects this API
+        after stream startup with ``MV_E_CALLORDER``, so callers must invoke it before starting
+        acquisition. Older or incomplete vendor SDK copies cannot silently use sequential
+        delivery when the configured preview policy requires latest-only frames; callers receive
+        a normalized client error instead.
+        """
+
+        constant_name = (
+            "MV_GrabStrategy_LatestImagesOnly"
+            if self._frame_delivery_mode == "latest_only"
+            else "MV_GrabStrategy_OneByOne"
+        )
+        try:
+            strategy = getattr(self._sdk, constant_name)
+        except AttributeError as error:
+            raise MvsCameraClientError(
+                "The copied MVS SDK does not provide {0}.".format(constant_name)
+            ) from error
+        try:
+            result = self._camera.MV_CC_SetGrabStrategy(strategy)
+        except AttributeError as error:
+            raise MvsCameraClientError(
+                "The copied MVS camera binding lacks MV_CC_SetGrabStrategy."
+            ) from error
+        self._require_success("MV_CC_SetGrabStrategy", result)
 
     def _convert_to_rgb8(
         self,

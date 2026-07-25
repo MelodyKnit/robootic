@@ -1,6 +1,7 @@
 """Lifecycle-enabled ports that isolate core logic from SDKs and simulators."""
 
 from abc import ABC, abstractmethod
+import time
 from typing import Awaitable, Callable, Mapping, Optional, Tuple, Union
 
 from gripper_ai_controller.domain.models import (
@@ -12,6 +13,7 @@ from gripper_ai_controller.domain.models import (
     GripperCommand,
     GripperStatus,
     ImageFrame,
+    JointPositionSnapshot,
     RobotCommand,
     RobotStatus,
     TelemetrySnapshot,
@@ -47,6 +49,20 @@ class RobotAdapter(LifecycleComponent):
     @abstractmethod
     async def get_status(self) -> RobotStatus:
         """Read the latest robot state."""
+
+    async def get_joint_positions(self) -> JointPositionSnapshot:
+        """Return a timestamped joint-angle observation derived from current status.
+
+        Adapters with an official dedicated joint-position API may override this
+        method. The default preserves compatibility for existing adapters while
+        keeping all generic callers on the same normalized radians contract.
+        """
+
+        status = await self.get_status()
+        positions = status.joint_positions_rad
+        if len(positions) != 6:
+            raise RuntimeError("Robot status must expose exactly six joint positions.")
+        return JointPositionSnapshot(time.time(), tuple(float(value) for value in positions))
 
     @abstractmethod
     async def execute(self, command: RobotCommand) -> RobotStatus:
