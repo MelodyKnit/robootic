@@ -1,0 +1,59 @@
+{
+  "runtime_mode": "development",
+  "camera": {
+    "camera_id": "sim-camera",
+    "calibration_id": "sim-camera-calibration",
+    "mounting": "fixed"
+  },
+  "components": {
+    "vision": "simulated-camera",
+    "plugins": {
+      "perception": "deterministic-perception",
+      "planners": [
+        "demonstration-planner"
+      ],
+      "observers": [
+        "audit"
+      ]
+    }
+  },
+  "targets": [
+    {
+      "name": "jaka-web-dry-run-primary",
+      "role": "primary",
+      "robot_adapter": "jaka-dry-run-robot",
+      "robot_adapter_settings": {
+        "initial_joint_positions_rad": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "maximum_joint_speed_rad_per_second": 0.5,
+        "maximum_joint_step_rad": 0.17453292519943295
+      },
+      "gripper_adapter": "simulated-gripper"
+    }
+  ],
+  "jaka_control": {
+    "target_name": "jaka-web-dry-run-primary",
+    "arm_timeout_seconds": 60.0,
+    "preview_timeout_seconds": 10.0,
+    "source_position_tolerance_rad": 0.01,
+    "idempotency_cache_size": 128,
+    "idempotency_ttl_seconds": 600.0
+  },
+  "web": {
+    "bind_host": "127.0.0.1",
+    "port": 8000,
+    "frontend_dist_dir": "src/web/dist",
+    "stream_fps": 10,
+    "jpeg_quality": 80,
+    "capture_retry_seconds": 1.0,
+    "camera_controls_enabled": false,
+    "gripper_controls_enabled": false,
+    "jaka_controls_enabled": false
+  }
+}

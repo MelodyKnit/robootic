@@ -2,10 +2,11 @@
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 from gripper_ai_controller.adapters.hikvision import HikvisionAdapter
-from gripper_ai_controller.adapters.jaka import JakaAdapter
+from gripper_ai_controller.adapters.jaka import JakaAdapter, JakaDryRunRobotAdapter
+from gripper_ai_controller.adapters.pgi import PgiTcpGripperAdapter
 from gripper_ai_controller.adapters.simulation import (
     SimulatedCameraAdapter,
     SimulatedGripperAdapter,
@@ -19,8 +20,15 @@ from gripper_ai_controller.plugins import AuditPlugin, DemonstrationPlannerPlugi
 from gripper_ai_controller.services.safety import SafetyPolicy
 
 
-ROBOT_ADAPTERS = {"simulated-robot": SimulatedRobotAdapter, "jaka-robot": JakaAdapter}
-GRIPPER_ADAPTERS = {"simulated-gripper": SimulatedGripperAdapter}
+ROBOT_ADAPTERS = {
+    "simulated-robot": SimulatedRobotAdapter,
+    "jaka-robot": JakaAdapter,
+    "jaka-dry-run-robot": JakaDryRunRobotAdapter,
+}
+GRIPPER_ADAPTERS = {
+    "simulated-gripper": SimulatedGripperAdapter,
+    "pgi-tcp-gripper": PgiTcpGripperAdapter,
+}
 VISION_ADAPTERS = {"simulated-camera": SimulatedCameraAdapter, "hikvision-camera": HikvisionAdapter}
 PERCEPTION_PLUGINS = {"deterministic-perception": DeterministicPerceptionPlugin}
 PLANNER_PLUGINS = {"demonstration-planner": DemonstrationPlannerPlugin}
@@ -90,16 +98,65 @@ def _build_target(settings: Any) -> ExecutionTarget:
 
     if not isinstance(settings, dict):
         raise ValueError("Every targets entry must be a JSON object.")
+    robot = create_component(
+        ROBOT_ADAPTERS,
+        required_string(settings, "robot_adapter"),
+        "robot adapter",
+        optional_mapping(settings, "robot_adapter_settings"),
+    )
     return ExecutionTarget(
-        required_string(settings, "name"),
-        _required_enum(settings, "role", TargetRole),
-        create_component(
-            ROBOT_ADAPTERS,
-            required_string(settings, "robot_adapter"),
-            "robot adapter",
-            optional_mapping(settings, "robot_adapter_settings"),
+        name=required_string(settings, "name"),
+        role=_required_enum(settings, "role", TargetRole),
+        robot=robot,
+        gripper=create_component(
+            GRIPPER_ADAPTERS,
+            required_string(settings, "gripper_adapter"),
+            "gripper adapter",
+            optional_mapping(settings, "gripper_adapter_settings"),
         ),
-        create_component(GRIPPER_ADAPTERS, required_string(settings, "gripper_adapter"), "gripper adapter"),
+        # JAKA adapters expose this pure validator; ordinary adapters retain generic safety only.
+        robot_motion_constraint=getattr(robot, "motion_constraint", None),
+    )
+
+
+def load_jaka_dry_run_target(
+    config_file: str, target_name: Optional[str] = None
+) -> Tuple[str, JakaDryRunRobotAdapter]:
+    """Load exactly one configured offline JAKA target without building the runtime graph.
+
+    This deliberately reads only the selected target's robot adapter settings. It does
+    not instantiate vision, gripper, planner, mirror, or physical JAKA components, so
+    the command-line dry run cannot connect to a controller as an indirect side effect.
+    """
+
+    payload = load_json_config(config_file)
+    candidates = []
+    for target in _required_list(payload, "targets"):
+        if not isinstance(target, dict):
+            raise ValueError("Every targets entry must be a JSON object.")
+        configured_name = required_string(target, "name")
+        adapter_name = required_string(target, "robot_adapter")
+        if adapter_name != "jaka-dry-run-robot":
+            continue
+        if target_name is None or target_name == configured_name:
+            candidates.append(target)
+
+    if target_name is not None and not candidates:
+        raise ValueError(
+            "No JAKA dry-run target named '{0}' exists in the supplied configuration.".format(
+                target_name
+            )
+        )
+    if len(candidates) != 1:
+        raise ValueError(
+            "The supplied configuration must contain exactly one selected JAKA dry-run target; "
+            "use --target when it contains multiple dry-run targets."
+        )
+
+    selected = candidates[0]
+    return (
+        required_string(selected, "name"),
+        JakaDryRunRobotAdapter(**optional_mapping(selected, "robot_adapter_settings")),
     )
 
 

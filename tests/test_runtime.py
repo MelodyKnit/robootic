@@ -5,11 +5,18 @@ import time
 import unittest
 from dataclasses import replace
 
+from gripper_ai_controller.adapters.jaka import JakaDryRunRobotAdapter
 from gripper_ai_controller.adapters.simulation import SimulatedCameraAdapter, SimulatedGripperAdapter
 from gripper_ai_controller.bootstrap.runtime_builder import build_runtime, load_runtime_config
 from gripper_ai_controller.configuration import SafetyLimits
 from gripper_ai_controller.core.components import PlannerPlugin
-from gripper_ai_controller.core.events import AdapterFailed, CommandAuthorized, CommandCompleted, FrameCaptured
+from gripper_ai_controller.core.events import (
+    AdapterFailed,
+    CommandAuthorized,
+    CommandCompleted,
+    CommandRejected,
+    FrameCaptured,
+)
 from gripper_ai_controller.core.runtime import Runtime
 from gripper_ai_controller.domain.models import (
     BoundingBox2D,
@@ -20,8 +27,11 @@ from gripper_ai_controller.domain.models import (
     GripperAction,
     GripperCommand,
     GraspCandidate,
+    JointMoveMode,
     PerceptionResult,
     Pose3D,
+    RobotAction,
+    RobotCommand,
     RuntimeMode,
 )
 from gripper_ai_controller.services.safety import SafetyPolicy
@@ -29,6 +39,7 @@ from gripper_ai_controller.services.safety import SafetyPolicy
 
 DEVELOPMENT_CONFIG = "configs/development.json"
 TOOL_CAMERA_CONFIG = "configs/tool-camera.json"
+JAKA_DRY_RUN_CONFIG = "configs/jaka-joint-dry-run.example.json"
 
 
 class UnsafePlanner(PlannerPlugin):
@@ -38,6 +49,24 @@ class UnsafePlanner(PlannerPlugin):
 
     async def propose(self, objective, perception):
         return GripperCommand(GripperAction.CLOSE, target_position=300, force_percent=101, speed_percent=30)
+
+
+class JointMovePlanner(PlannerPlugin):
+    """Return one predetermined robot command for runtime safety-path tests."""
+
+    manifest = ComponentManifest(
+        "joint-move-test-planner", "0.1.0", "planner", ("planner",), "JointMovePlanner"
+    )
+
+    def __init__(self, command):
+        """Store the normalized proposal without acquiring any adapter dependency."""
+
+        self.command = command
+
+    async def propose(self, objective, perception):
+        """Return the fixed proposal so Runtime remains the authorization owner."""
+
+        return self.command
 
 
 class StaleCamera(SimulatedCameraAdapter):
@@ -72,6 +101,79 @@ class RuntimeTests(unittest.TestCase):
                 self.assertIn("simulated-camera", runtime.registry.components)
                 self.assertTrue(any(isinstance(event, CommandAuthorized) for event in audit.events))
                 self.assertTrue(any(isinstance(event, CommandCompleted) for event in audit.events))
+            finally:
+                await runtime.shutdown()
+
+        self.run_async(scenario())
+
+    def test_jaka_dry_run_joint_move_is_authorized_then_mirrored_with_one_command_id(self):
+        async def scenario():
+            config = load_runtime_config(JAKA_DRY_RUN_CONFIG)
+            command = RobotCommand(
+                RobotAction.MOVE_JOINTS,
+                (0.05, -0.05, 0.02, -0.02, 0.01, -0.01),
+                speed=0.25,
+                joint_move_mode=JointMoveMode.ABSOLUTE,
+            )
+            config.planner_plugins = (JointMovePlanner(command),)
+            runtime = Runtime(config)
+            await runtime.startup()
+            try:
+                result = await runtime.run_objective("Dry-run JAKA joint move")
+                primary, mirror = runtime.config.targets
+                self.assertTrue(result.decision.allowed)
+                self.assertEqual(2, len(result.reports))
+                self.assertTrue(all(report.succeeded for report in result.reports))
+                self.assertEqual(result.reports[0].command_id, result.reports[1].command_id)
+                self.assertIsInstance(primary.robot, JakaDryRunRobotAdapter)
+                self.assertEqual(command.joint_positions_rad, (await primary.robot.get_status()).joint_positions_rad)
+                self.assertEqual(command.joint_positions_rad, (await mirror.robot.get_status()).joint_positions_rad)
+            finally:
+                await runtime.shutdown()
+
+        self.run_async(scenario())
+
+    def test_jaka_dry_run_constraint_rejects_invalid_joint_step_before_all_dispatch(self):
+        async def scenario():
+            config = load_runtime_config(JAKA_DRY_RUN_CONFIG)
+            config.planner_plugins = (
+                JointMovePlanner(
+                    RobotCommand(
+                        RobotAction.MOVE_JOINTS,
+                        (0.20, 0.0, 0.0, 0.0, 0.0, 0.0),
+                        speed=0.25,
+                    )
+                ),
+            )
+            runtime = Runtime(config)
+            await runtime.startup()
+            try:
+                result = await runtime.run_objective("Reject excessive JAKA joint step")
+                primary, mirror = runtime.config.targets
+                audit = runtime.config.observer_plugins[0]
+                self.assertFalse(result.decision.allowed)
+                self.assertIn("JAKA motion constraint", result.decision.reason)
+                self.assertEqual(0, len(result.reports))
+                self.assertEqual((0.0,) * 6, (await primary.robot.get_status()).joint_positions_rad)
+                self.assertEqual((0.0,) * 6, (await mirror.robot.get_status()).joint_positions_rad)
+                self.assertTrue(any(isinstance(event, CommandRejected) for event in audit.events))
+            finally:
+                await runtime.shutdown()
+
+        self.run_async(scenario())
+
+    def test_jaka_dry_run_stop_bypasses_stale_perception_when_connected(self):
+        async def scenario():
+            config = load_runtime_config(JAKA_DRY_RUN_CONFIG)
+            config.vision = StaleCamera()
+            config.planner_plugins = (JointMovePlanner(RobotCommand(RobotAction.STOP)),)
+            runtime = Runtime(config)
+            await runtime.startup()
+            try:
+                result = await runtime.run_objective("Stop offline JAKA target")
+                self.assertTrue(result.decision.allowed)
+                self.assertEqual(2, len(result.reports))
+                self.assertTrue(all(report.succeeded for report in result.reports))
             finally:
                 await runtime.shutdown()
 

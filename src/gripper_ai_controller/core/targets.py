@@ -8,10 +8,12 @@ from gripper_ai_controller.domain.models import (
     CommandEnvelope,
     GripperCommand,
     RobotCommand,
+    RobotStatus,
+    SafetyDecision,
     TargetRole,
     TelemetrySnapshot,
 )
-from gripper_ai_controller.domain.ports import GripperAdapter, RobotAdapter
+from gripper_ai_controller.domain.ports import GripperAdapter, RobotAdapter, RobotMotionConstraint
 
 
 @dataclass
@@ -22,6 +24,20 @@ class ExecutionTarget:
     role: TargetRole
     robot: RobotAdapter
     gripper: GripperAdapter
+    robot_motion_constraint: RobotMotionConstraint = None
+
+    def evaluate_robot_motion(self, command: RobotCommand, status: RobotStatus) -> SafetyDecision:
+        """Apply an optional adapter-specific constraint before core authorization.
+
+        Targets without a specialized constraint retain the existing generic runtime
+        policy. Constraints receive telemetry captured for the current dispatch cycle,
+        so relative joint commands are evaluated against the same state later used by
+        the adapter.
+        """
+
+        if self.robot_motion_constraint is None:
+            return SafetyDecision(True, "No adapter-specific robot motion constraint is configured.")
+        return self.robot_motion_constraint.evaluate(command, status)
 
     async def startup(self) -> None:
         """Start and initialize both adapters for this target."""

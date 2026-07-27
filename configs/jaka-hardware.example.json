@@ -24,7 +24,9 @@
       "robot_adapter": "jaka-robot",
       "robot_adapter_settings": {
         "controller_ip": "replace-with-local-controller-ip",
-        "allow_enable": false
+        "allow_enable": false,
+        "allow_manual_motion": false,
+        "robot_model": "zu3"
       },
       "gripper_adapter": "simulated-gripper"
     },

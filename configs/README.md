@@ -6,6 +6,9 @@
 - `tool-camera.json`：包含工具端安装相机标定拓扑的同一安全组件图。
 - `production.example.json`：不可直接运行的模板。在实现项目本地真实适配器前，生产环境保持故障关闭。
 - `jaka-hardware.example.json`：JAKA 连接模板。复制到 `localstore/` 后填入本机控制器地址；默认关闭使能，且不应直接以模板运行。
+- `jaka-joint-dry-run.example.json`：JAKA Zu 3 关节运动干运行模板。它使用内存中的 JAKA 主目标和模拟镜像，不包含控制器地址，不能加载 SDK、连接控制器、上电、使能或下发真实运动。
+- `jaka-web-control.example.json`：JAKA 网页控制的干运行模板。它只选择 `jaka-dry-run-robot`、绑定本地回环地址，并将网页控制开关保持为关闭；不包含控制器地址或真机授权。
+- `gripper-web-control.example.json`：夹爪网页控制的模拟模板。它包含模拟主目标、保守的开闭位置和控制限位，但默认关闭控制开关；复制到 `localstore/` 后才能显式开启。
 - `hikvision-usb.example.json`：海康 USB3 Vision 相机模板。复制到 `localstore/` 后填入相机序列号与真实标定标识；模板默认禁止网页写入相机参数，并以最新帧优先方式预览。
 - `pose-preview.example.json`：人体 2D 姿态追踪模板。默认关闭；复制到 `localstore/` 后填写本机相机与模型权重路径，再显式启用。
 - `vision-evaluation.example.json`：不创建相机的离线图片评测模板。它只引用 `localstore/` 中的 CUDA 模型权重，可与 `data/vision-fixtures/` 一起验证 RGB 和 Mono8 推理路径。
@@ -22,6 +25,30 @@ poetry run gripper-ai-controller jaka-joints --config-file localstore/jaka-hardw
 
 该命令只登录选定 JAKA 目标、读取 `J1` 至 `J6` 的弧度关节角并登出。它不会启动相机、夹爪、网页服务或完整运行时，也不会上电、使能、去使能或下发运动指令。`get_joint_position()` 返回的是关节空间角度，不是各实体关节在三维空间中的位置；后者需要另行建立该型号的运动学模型。
 
+## JAKA 关节干运行
+
+`jaka-joint-dry-run` 仅加载配置中指定的 `jaka-dry-run-robot` 目标及其关节限制，不会构造相机、夹爪、模拟镜像、完整运行时或真实 `JakaAdapter`。适配器只维护六轴预测状态，并输出逻辑 SDK 调用预览；`sent_to_hardware` 始终为 `false`。
+
+从项目根目录执行绝对关节目标预览：
+
+```powershell
+poetry run gripper-ai-controller jaka-joint-dry-run --config-file configs/jaka-joint-dry-run.example.json --target jaka-dry-run-primary --joint-positions-rad "[0.1, 0.0, 0.0, 0.0, 0.0, 0.0]" --mode absolute --speed-rad-per-second 0.5
+```
+
+相对关节命令将六个值解释为相对于当前预测状态的增量：
+
+```powershell
+poetry run gripper-ai-controller jaka-joint-dry-run --config-file configs/jaka-joint-dry-run.example.json --joint-positions-rad "[0.1, 0.0, 0.0, 0.0, 0.0, 0.0]" --mode relative --speed-rad-per-second 0.5
+```
+
+逻辑停止命令不需要视觉结果，且不改变预测关节角：
+
+```powershell
+poetry run gripper-ai-controller jaka-joint-dry-run --config-file configs/jaka-joint-dry-run.example.json --stop
+```
+
+移动命令必须提供六个有限弧度值、`--mode` 和 `--speed-rad-per-second`。模板默认采用 JAKA Zu 3 的保守软件限制：各轴硬件范围向内收缩 `10°`、最大速度 `0.5 rad/s`、单轴单步最大 `10°`。`robot_adapter_settings` 可提供 `joint_lower_limits_rad`、`joint_upper_limits_rad`、`maximum_joint_speed_rad_per_second` 与 `maximum_joint_step_rad` 进一步收紧限制；它们不能突破物理范围或默认软件边界，速度与单步上限也只能继续收紧。
+
 ## 网页预览段
 
 可启动 `gripper-ai-controller web` 的配置需包含可选的 `web` JSON 对象。未填写字段使用下列默认值：
@@ -33,8 +60,41 @@ poetry run gripper-ai-controller jaka-joints --config-file localstore/jaka-hardw
 - `jpeg_quality`：`80`，范围为 `1` 至 `95`；
 - `capture_retry_seconds`：`1.0`，范围为 `0.1` 至 `30`。
 - `camera_controls_enabled`：`false`，严格布尔值。设为 `true` 后允许网页写入当前相机适配器公开的固定参数白名单；版本化海康模板必须保持 `false`，真实写入仅可在 `localstore/` 本机配置显式开启。
+- `gripper_controls_enabled`：`false`，严格布尔值。设为 `true` 时必须同时提供 `gripper_control` 和一个选中的 `primary` 目标，且 `bind_host` 必须严格为 `"127.0.0.1"`；命令行 `--host` 也不能绕过该限制。
+- `jaka_controls_enabled`：`false`，严格布尔值。设为 `true` 时必须同时提供 `jaka_control` 和一个选中的 `primary` JAKA 目标，且 `bind_host` 必须严格为 `"127.0.0.1"`；命令行 `--host` 同样不能绕过该限制。
 
-网页服务只读取上述设置和 `camera`、`components.vision`、`components.vision_adapter_settings`、根 `camera_parameters`。即使同一配置还声明 `targets`、插件或安全设置，它也不会构建或启动它们。真实序列号、真实标定标识和本机覆盖仍必须置于被 Git 忽略的 `localstore/` 配置文件。
+未声明 `gripper_control` 或 `jaka_control` 时，网页服务只读取上述设置和 `camera`、`components.vision`、`components.vision_adapter_settings`、根 `camera_parameters`。即使同一配置还声明 `targets`、插件或安全设置，它也不会构建或启动它们。声明人工控制段后，服务只构造该段 `target_name` 指向的一个主设备以提供只读状态；只有相应控制开关启用时才允许人工动作。它不构造完整运行时、规划器或镜像目标。真实序列号、真实标定标识和本机覆盖仍必须置于被 Git 忽略的 `localstore/` 配置文件。
+
+## 夹爪网页控制段
+
+启用 `web.gripper_controls_enabled` 时，根对象必须增加 `gripper_control`。支持字段如下：
+
+- `target_name`：必填，必须精确选择 `targets` 中唯一的 `primary` 目标；
+- `open_position`、`close_position`：必填整数，范围为 `minimum_position` 至 `maximum_position`，且两者必须不同；它们由现场实际安装方向决定；
+- `minimum_position`、`maximum_position`：允许的目标位置范围，默认 `0` 与 `1000`；
+- `minimum_force_percent`、`maximum_force_percent`：允许的力百分比范围，默认 `20` 至 `30`；
+- `minimum_speed_percent`、`maximum_speed_percent`：模拟夹爪允许的速度范围，默认 `1` 至 `20`。PGI TCP 真机不支持速度命令，页面会禁用该控件；
+- `arm_timeout_seconds`：临时控制令牌的无成功操作超时，默认 `60` 秒，范围为 `5` 至 `600`；
+- `initialization_timeout_seconds`：网页等待普通初始化完成的上限，默认 `5` 秒，范围为 `1` 至 `30`；
+- `idempotency_cache_size`、`idempotency_ttl_seconds`：重复动作的内存幂等缓存上限与保留时间。
+
+真实 PGI TCP 目标将 `gripper_adapter` 设为 `"pgi-tcp-gripper"`，并在该目标的 `gripper_adapter_settings` 中填写真实 `host`、`port`、`device_id`、连接超时和初始化轮询设置。这些设备字段只能存在于 `localstore/` 本机文件，不能放入版本化模板。服务启动只连接并读取状态，不执行初始化或位置命令；普通初始化仍必须由页面解锁、确认和幂等请求显式触发。
+
+## JAKA 网页控制段
+
+启用 `web.jaka_controls_enabled` 时，根对象必须增加 `jaka_control`。支持字段如下：
+
+- `target_name`：必填，必须精确选择 `targets` 中唯一的 `primary` JAKA 目标；
+- `arm_timeout_seconds`：临时控制令牌的无成功操作超时，默认 `60` 秒；
+- `preview_timeout_seconds`：关节动作预览的有效时长，默认 `10` 秒；过期后必须重新读取状态并创建预览；
+- `source_position_tolerance_rad`：预览来源关节角与执行前新遥测允许的最大单轴偏差，默认 `0.01` 弧度；超过该值必须重新预览；
+- `idempotency_cache_size`、`idempotency_ttl_seconds`：使能和已确认关节动作的内存幂等缓存上限与保留时间。
+
+`jaka-web-control.example.json` 只选用 `jaka-dry-run-robot`，其 `web.jaka_controls_enabled` 必须保持 `false`，可用于检查配置和只读状态而不会加载 SDK、建立网络连接、上电、使能或发送真实运动。若要演练干运行的解锁、预览和二次确认，先将模板复制到 Git 忽略的 `localstore/`，再仅对该副本显式开启控制。真机配置也必须从该模板复制到 `localstore/`：选中的目标使用 `"jaka-robot"`，其 `robot_adapter_settings` 中的真实 `controller_ip`、`allow_enable`、`allow_manual_motion` 和 `robot_model: "zu3"` 只允许存在于该本机文件。`robot_model` 缺失时适配器仅提供读取，不能发送网页动作。上述字段绝不能写入 `configs/`、文档或提交内容。
+
+即使真机本机配置已声明 JAKA 目标，服务启动和“重新连接”也只执行登录与状态读取，绝不调用 `power_on()`、`enable_robot()`、`joint_move()` 或其他运动接口。网页人工动作必须先确认工作区清空和现场独立急停可用，取得短时令牌后提交一次六轴**绝对**关节目标预览；只有预览未过期、来源关节角仍在容差内并经第二次明确确认后，才允许执行。网页当前不提供软件急停，不能将关闭页面、撤销授权或断开网络当作停止运动的手段；现场独立急停始终是恢复措施。
+
+真实测试前必须由操作者确认实际机械臂型号与 JAKA Zu 3 限位模板相符，并以 `robot_model: "zu3"` 显式确认；同时确认控制器和 Python 3.7 SDK 二进制兼容、工具/负载与安装状态已完成现场安全评估，并确认工作区无人且无障碍物。控制器通信断开、未到位、拖拽、故障或急停时，网页动作会被拒绝；阻塞调用返回后目标关节误差超出来源容差也会报告失败。不得通过网页修改控制器安全参数、碰撞设置、网络异常行为或现场限位。
 
 ## 相机参数持久化段
 

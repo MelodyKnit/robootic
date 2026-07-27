@@ -2,8 +2,10 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import CameraParameterPanel from './CameraParameterPanel.vue'
+import GripperControlPanel from './GripperControlPanel.vue'
 import PoseSkeletonOverlay from './PoseSkeletonOverlay.vue'
 import PoseTargetPanel from './PoseTargetPanel.vue'
+import RobotControlPanel from './RobotControlPanel.vue'
 import VisionAnalysisPanel from './VisionAnalysisPanel.vue'
 import { useCameraPreview } from '../composables/useCameraPreview'
 import { usePoseTracking } from '../composables/usePoseTracking'
@@ -39,7 +41,7 @@ const {
   stop: stopVisionAnalysis,
 } = useVisionAnalysis(selectedCameraId)
 
-const activeTab = ref<'vision' | 'parameter'>('vision')
+const activeTab = ref<'vision' | 'parameter' | 'gripper' | 'robot'>('vision')
 
 const streamImage = ref<HTMLImageElement | null>(null)
 
@@ -222,6 +224,22 @@ onBeforeUnmount(() => {
         >
           相机配置设置
         </button>
+        <button
+          id="gripper-control-tab-button"
+          class="flex-1 py-3 text-xs font-bold uppercase tracking-wider border-b-2 text-center transition"
+          :class="activeTab === 'gripper' ? 'text-indigo-400 border-indigo-500 bg-slate-900/20' : 'text-slate-400 border-transparent hover:text-slate-200'"
+          @click="activeTab = 'gripper'"
+        >
+          夹爪控制
+        </button>
+        <button
+          id="robot-control-tab-button"
+          class="flex-1 py-3 text-xs font-bold uppercase tracking-wider border-b-2 text-center transition"
+          :class="activeTab === 'robot' ? 'text-indigo-400 border-indigo-500 bg-slate-900/20' : 'text-slate-400 border-transparent hover:text-slate-200'"
+          @click="activeTab = 'robot'"
+        >
+          机械臂控制
+        </button>
       </div>
 
       <!-- Tab Contents (scrollable container) -->
@@ -241,6 +259,13 @@ onBeforeUnmount(() => {
         <div v-show="activeTab === 'parameter'" class="h-full">
           <CameraParameterPanel :camera-id="camera?.cameraId ?? null" />
         </div>
+
+        <div v-show="activeTab === 'gripper'" class="h-full">
+          <GripperControlPanel />
+        </div>
+
+        <!-- A physical-control panel must release its browser token when hidden. -->
+        <RobotControlPanel v-if="activeTab === 'robot'" />
       </div>
     </aside>
   </div>

@@ -10,6 +10,7 @@ class GripperAction(Enum):
 
     OPEN = "open"
     CLOSE = "close"
+    MOVE_TO_POSITION = "move_to_position"
     HOLD = "hold"
     STOP = "stop"
 
@@ -20,6 +21,13 @@ class RobotAction(Enum):
     MOVE_JOINTS = "move_joints"
     MOVE_LINEAR = "move_linear"
     STOP = "stop"
+
+
+class JointMoveMode(Enum):
+    """Supported interpretations for a six-axis joint command."""
+
+    ABSOLUTE = "absolute"
+    RELATIVE = "relative"
 
 
 class TargetRole(Enum):
@@ -205,6 +213,7 @@ class RobotCommand:
     joint_positions_rad: Tuple[float, ...] = ()
     target_pose: Optional[Pose3D] = None
     speed: float = 0.0
+    joint_move_mode: JointMoveMode = JointMoveMode.ABSOLUTE
 
 
 CommandPayload = Union[GripperCommand, RobotCommand]
@@ -221,13 +230,23 @@ class CommandEnvelope:
 
 @dataclass(frozen=True)
 class GripperStatus:
-    """The safety-relevant live state reported by a gripper adapter."""
+    """The safety-relevant state reported by a gripper adapter.
+
+    ``position`` is a physical feedback value only when ``position_is_feedback``
+    is true. Some verified transports expose only their configured target position.
+    """
 
     initialized: bool
     position: int
     gripping: bool
     faulted: bool = False
     emergency_stopped: bool = False
+    connected: bool = False
+    initializing: bool = False
+    moving: bool = False
+    grip_state: str = "unknown"
+    last_error: Optional[str] = None
+    position_is_feedback: bool = True
 
 
 @dataclass(frozen=True)
@@ -242,6 +261,7 @@ class RobotStatus:
     connected: bool = False
     powered: bool = False
     enabled: bool = False
+    moving: bool = False
 
 
 @dataclass(frozen=True)

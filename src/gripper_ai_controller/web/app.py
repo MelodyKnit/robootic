@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from gripper_ai_controller.bootstrap.preview_builder import VisionPreviewConfig
+from gripper_ai_controller.configuration import SafetyLimits
 from gripper_ai_controller.domain.models import CameraParameter, CameraParameterApplyMode
 from gripper_ai_controller.domain.ports import CameraParameterError
 from gripper_ai_controller.pose.config_store import PoseTargetConfigStore
@@ -22,9 +23,14 @@ from gripper_ai_controller.pose.models import (
     PoseMotion2D,
 )
 from gripper_ai_controller.pose.tracker import PoseTargetError, PoseTrackingService
+from gripper_ai_controller.services.safety import SafetyPolicy
 from gripper_ai_controller.vision.analysis import VisionAnalysisService
 from gripper_ai_controller.vision.models import VisionAnalysisSnapshot
 from gripper_ai_controller.web.config_store import CameraParameterConfigStore
+from gripper_ai_controller.web.gripper_api import install_gripper_routes
+from gripper_ai_controller.web.gripper_service import ManualGripperControlService
+from gripper_ai_controller.web.jaka_api import install_jaka_routes
+from gripper_ai_controller.web.jaka_service import ManualJakaControlService
 from gripper_ai_controller.web.models import CameraPreviewStatus, PosePreviewSnapshot
 from gripper_ai_controller.web.service import (
     CameraParameterCapabilityError,
@@ -229,9 +235,18 @@ def create_web_app(
     preview_config: VisionPreviewConfig,
     frontend_dist_dir: Optional[str] = None,
     preview_service: Optional[CameraPreviewService] = None,
+    gripper_control_service: Optional[ManualGripperControlService] = None,
+    jaka_control_service: Optional[ManualJakaControlService] = None,
 ) -> FastAPI:
-    """Create one FastAPI app that owns only the configured vision preview service."""
+    """Create one FastAPI app for preview plus optionally gated manual device control."""
 
+    if (
+        preview_config.settings.gripper_controls_enabled
+        or preview_config.settings.jaka_controls_enabled
+    ) and preview_config.settings.bind_host != "127.0.0.1":
+        raise ValueError(
+            "Browser gripper or JAKA controls require a 127.0.0.1 preview configuration."
+        )
     if preview_config.pose_settings.enabled:
         preflight = inspect_cuda_gpu()
         if not preflight.ready_for_pose_inference:
@@ -290,14 +305,57 @@ def create_web_app(
     else:
         service = preview_service
 
+    if gripper_control_service is None:
+        if preview_config.gripper is not None and preview_config.gripper_control_settings is not None:
+            control_settings = preview_config.gripper_control_settings
+            gripper_control_service = ManualGripperControlService(
+                preview_config.gripper,
+                SafetyPolicy(
+                    SafetyLimits(
+                        minimum_force_percent=control_settings.minimum_force_percent,
+                        maximum_force_percent=control_settings.maximum_force_percent,
+                        maximum_position=control_settings.maximum_position,
+                        minimum_speed_percent=control_settings.minimum_speed_percent,
+                        maximum_speed_percent=control_settings.maximum_speed_percent,
+                    )
+                ),
+                control_settings,
+                controls_enabled=preview_config.settings.gripper_controls_enabled,
+            )
+
+    if jaka_control_service is None:
+        if preview_config.jaka is not None and preview_config.jaka_control_settings is not None:
+            jaka_control_service = ManualJakaControlService(
+                preview_config.jaka,
+                SafetyPolicy(SafetyLimits()),
+                preview_config.jaka_control_settings,
+                controls_enabled=preview_config.settings.jaka_controls_enabled,
+            )
+
+    if (
+        bool(getattr(gripper_control_service, "controls_enabled", False))
+        or bool(getattr(jaka_control_service, "controls_enabled", False))
+    ) and preview_config.settings.bind_host != "127.0.0.1":
+        raise ValueError(
+            "An injected browser gripper or JAKA control service requires a 127.0.0.1 preview configuration."
+        )
+
     @asynccontextmanager
     async def lifespan(application):
-        """Start and stop only camera preview resources with the ASGI application."""
+        """Start preview and optional device facades without autonomous execution."""
 
         await service.startup()
+        if gripper_control_service is not None:
+            await gripper_control_service.startup()
+        if jaka_control_service is not None:
+            await jaka_control_service.startup()
         try:
             yield
         finally:
+            if jaka_control_service is not None:
+                await jaka_control_service.shutdown()
+            if gripper_control_service is not None:
+                await gripper_control_service.shutdown()
             await service.shutdown()
 
     application = FastAPI(
@@ -308,6 +366,8 @@ def create_web_app(
         lifespan=lifespan,
     )
     application.state.camera_preview_service = service
+    application.state.manual_gripper_control_service = gripper_control_service
+    application.state.manual_jaka_control_service = jaka_control_service
 
     @application.exception_handler(RequestValidationError)
     async def invalid_request_error(request, error):
@@ -518,6 +578,8 @@ def create_web_app(
             headers={"Cache-Control": "no-store"},
         )
 
+    install_gripper_routes(application, gripper_control_service)
+    install_jaka_routes(application, jaka_control_service)
     _mount_frontend_if_present(application, frontend_dist_dir)
     return application
 

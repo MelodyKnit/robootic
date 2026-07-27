@@ -16,6 +16,7 @@ from gripper_ai_controller.domain.models import (
     JointPositionSnapshot,
     RobotCommand,
     RobotStatus,
+    SafetyDecision,
     TelemetrySnapshot,
 )
 
@@ -73,6 +74,19 @@ class RobotAdapter(LifecycleComponent):
         """Apply primary telemetry to a mirror adapter."""
 
 
+class RobotMotionConstraint(ABC):
+    """Validate one robot command against adapter-specific motion limits.
+
+    The runtime owns authorization and invokes this optional constraint before
+    dispatch. Implementations are pure: they must not contact a device or mutate
+    adapter state while deciding whether a command is admissible.
+    """
+
+    @abstractmethod
+    def evaluate(self, command: RobotCommand, status: RobotStatus) -> SafetyDecision:
+        """Return an authorization decision for one normalized robot command."""
+
+
 class GripperAdapter(LifecycleComponent):
     """Executes approved gripper commands and exposes live gripper state."""
 
@@ -91,6 +105,38 @@ class GripperAdapter(LifecycleComponent):
     @abstractmethod
     async def synchronize(self, status: GripperStatus) -> None:
         """Apply primary telemetry to a mirror adapter."""
+
+
+class OperatorControllableGripper(GripperAdapter):
+    """Optional adapter capability for explicit operator-controlled hardware actions.
+
+    Normal lifecycle initialization must remain free of physical motion. The Web
+    control facade invokes ``operator_initialize`` only after its local authorization
+    and temporary arming checks have succeeded.
+    """
+
+    @property
+    @abstractmethod
+    def control_mode(self) -> str:
+        """Return ``simulation`` or ``physical`` for operator-facing status."""
+
+    @property
+    @abstractmethod
+    def supports_speed(self) -> bool:
+        """Return whether verified hardware speed writes are available."""
+
+    @property
+    @abstractmethod
+    def supports_stop(self) -> bool:
+        """Return whether a verified software stop command is available."""
+
+    @abstractmethod
+    async def operator_initialize(self) -> GripperStatus:
+        """Run the adapter's explicit operator-authorized initialization action."""
+
+    @abstractmethod
+    async def reconnect(self) -> GripperStatus:
+        """Replace the current connection without initializing or moving the gripper."""
 
 
 class VisionAdapter(LifecycleComponent):

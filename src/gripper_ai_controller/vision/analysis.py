@@ -238,21 +238,26 @@ class VisionAnalysisService:
                 if frame is None:
                     self._analysis_task = None
                     return
-                self._last_analysis_started_at = self._monotonic_clock()
 
             try:
-                diagnostics = await event_loop.run_in_executor(
+                started_at, diagnostics = await event_loop.run_in_executor(
                     self._analysis_executor,
-                    self._inspector.inspect,
+                    self._inspect_with_started_at,
+                    self._monotonic_clock,
+                    self._inspector,
                     frame,
                 )
             except Exception:
                 # The inspector already turns malformed vendor payloads into stable
                 # diagnostics. An unexpected failure must still leave acquisition
                 # healthy and permit a later latest frame to be analyzed.
+                # A failed dispatch receives a conservative completion timestamp so
+                # an executor failure cannot bypass the configured analysis interval.
+                started_at = self._monotonic_clock()
                 diagnostics = None
 
             async with self._lock_for_current_loop():
+                self._last_analysis_started_at = started_at
                 if diagnostics is not None:
                     self._qualities[frame.captured_at] = diagnostics
                     while len(self._qualities) > 8:
@@ -263,6 +268,16 @@ class VisionAnalysisService:
                 if self._pending_frame is None:
                     self._analysis_task = None
                     return
+
+    @staticmethod
+    def _inspect_with_started_at(
+        monotonic_clock: Callable[[], float],
+        inspector: FrameQualityInspector,
+        frame: ImageFrame,
+    ) -> Tuple[float, FrameQualityDiagnostics]:
+        """Measure the actual native-worker start rather than the event-loop dispatch time."""
+
+        return monotonic_clock(), inspector.inspect(frame)
 
     @staticmethod
     def _persons(

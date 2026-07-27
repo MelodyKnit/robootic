@@ -24,7 +24,7 @@ from gripper_ai_controller.domain.models import (
 from gripper_ai_controller.domain.ports import (
     CameraParameterAdapter,
     CameraParameterError,
-    GripperAdapter,
+    OperatorControllableGripper,
     RobotAdapter,
 )
 
@@ -86,7 +86,7 @@ class SimulatedRobotAdapter(BaseAdapter, RobotAdapter):
         self.status = status
 
 
-class SimulatedGripperAdapter(BaseAdapter, GripperAdapter):
+class SimulatedGripperAdapter(BaseAdapter, OperatorControllableGripper):
     """An in-memory PGI-like gripper representation for primary and mirror targets."""
 
     manifest = ComponentManifest(
@@ -104,10 +104,60 @@ class SimulatedGripperAdapter(BaseAdapter, GripperAdapter):
         self.fail_on_execute = fail_on_execute
         self.status = GripperStatus(initialized=False, position=1000, gripping=False)
 
+    @property
+    def control_mode(self) -> str:
+        """Identify the adapter as a hardware-free operator-control target."""
+
+        return "simulation"
+
+    @property
+    def supports_speed(self) -> bool:
+        """Report that simulated commands can retain a speed proposal safely."""
+
+        return True
+
+    @property
+    def supports_stop(self) -> bool:
+        """Report that the in-memory model supports a logical stop action."""
+
+        return True
+
+    async def on_startup(self) -> None:
+        """Make the simulated transport available without initializing the gripper."""
+
+        self.status = replace(self.status, connected=True, last_error=None)
+
+    async def on_shutdown(self) -> None:
+        """Disconnect the simulated transport and clear transient motion state."""
+
+        self.status = replace(self.status, connected=False, initializing=False, moving=False)
+
     async def initialize(self) -> GripperStatus:
         """Mark the gripper initialized while preserving its existing simulated position."""
 
-        self.status = GripperStatus(initialized=True, position=self.status.position, gripping=False)
+        self.status = replace(
+            self.status,
+            initialized=True,
+            initializing=False,
+            moving=False,
+            gripping=False,
+            grip_state="reached",
+            last_error=None,
+        )
+        return self.status
+
+    async def operator_initialize(self) -> GripperStatus:
+        """Perform the simulation-only equivalent of an operator initialization."""
+
+        self.ensure_started()
+        return await self.initialize()
+
+    async def reconnect(self) -> GripperStatus:
+        """Restore the simulated connection without changing position or initialization."""
+
+        if not self.started:
+            await self.startup()
+        self.status = replace(self.status, connected=True, last_error=None)
         return self.status
 
     async def get_status(self) -> GripperStatus:
@@ -125,12 +175,16 @@ class SimulatedGripperAdapter(BaseAdapter, GripperAdapter):
         if self.fail_on_execute:
             raise RuntimeError("Simulated gripper execution failed.")
         if command.action in (GripperAction.HOLD, GripperAction.STOP):
+            self.status = replace(self.status, moving=False, grip_state="stopped")
             return self.status
         position = self.status.position if command.target_position is None else command.target_position
-        self.status = GripperStatus(
-            initialized=True,
+        self.status = replace(
+            self.status,
             position=position,
             gripping=command.action == GripperAction.CLOSE,
+            moving=False,
+            grip_state="gripping" if command.action == GripperAction.CLOSE else "reached",
+            last_error=None,
         )
         return self.status
 

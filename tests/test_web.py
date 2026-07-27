@@ -14,8 +14,14 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from gripper_ai_controller.adapters.base import FrameDispatchingVisionAdapter
-from gripper_ai_controller.adapters.simulation import SimulatedCameraAdapter
-from gripper_ai_controller.bootstrap.preview_builder import VisionPreviewConfig, load_vision_preview_config
+from gripper_ai_controller.adapters.jaka import JakaDryRunRobotAdapter
+from gripper_ai_controller.adapters.pgi import PgiTcpGripperAdapter
+from gripper_ai_controller.adapters.simulation import SimulatedCameraAdapter, SimulatedGripperAdapter
+from gripper_ai_controller.bootstrap.preview_builder import (
+    VisionPreviewConfig,
+    load_vision_preview_config,
+    validate_web_settings,
+)
 from gripper_ai_controller.configuration import PoseTrackingSettings, WebPreviewSettings
 from gripper_ai_controller.domain.models import BoundingBox2D, ImageFrame
 from gripper_ai_controller.domain.ports import VisionAdapter
@@ -178,6 +184,14 @@ class PreviewConfigurationTests(unittest.TestCase):
         self.assertEqual(10, preview.settings.stream_fps)
         self.assertTrue(preview.settings.camera_controls_enabled)
 
+    def test_disabled_gripper_template_keeps_a_read_only_simulated_adapter(self):
+        preview = load_vision_preview_config("configs/gripper-web-control.example.json")
+
+        self.assertFalse(preview.settings.gripper_controls_enabled)
+        self.assertIsInstance(preview.gripper, SimulatedGripperAdapter)
+        self.assertFalse(preview.gripper.started)
+        self.assertEqual("sim-primary", preview.gripper_control_settings.target_name)
+
     def test_rejects_unknown_or_invalid_web_settings(self):
         payload = {
             "camera": {"camera_id": "camera-a"},
@@ -204,6 +218,148 @@ class PreviewConfigurationTests(unittest.TestCase):
             config_path.write_text(json.dumps(payload), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "camera_controls_enabled"):
                 load_vision_preview_config(str(config_path))
+
+    def test_gripper_control_requires_loopback_and_a_primary_target(self):
+        payload = {
+            "camera": {"camera_id": "camera-a"},
+            "components": {"vision": "simulated-camera"},
+            "targets": [
+                {
+                    "name": "sim-primary",
+                    "role": "primary",
+                    "robot_adapter": "simulated-robot",
+                    "gripper_adapter": "simulated-gripper",
+                }
+            ],
+            "gripper_control": {
+                "target_name": "sim-primary",
+                "open_position": 900,
+                "close_position": 100,
+            },
+            "web": {"bind_host": "0.0.0.0", "gripper_controls_enabled": True},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "gripper-preview.json"
+            config_path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "127.0.0.1"):
+                load_vision_preview_config(str(config_path))
+
+            payload["web"]["bind_host"] = "127.0.0.1"
+            config_path.write_text(json.dumps(payload), encoding="utf-8")
+            preview = load_vision_preview_config(str(config_path))
+            self.assertEqual("sim-primary", preview.gripper_control_settings.target_name)
+            self.assertEqual(900, preview.gripper_control_settings.open_position)
+            self.assertFalse(preview.gripper.started)
+
+            payload["targets"][0]["role"] = "mirror"
+            config_path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "primary target"):
+                load_vision_preview_config(str(config_path))
+
+    def test_jaka_control_is_only_wired_when_the_config_declares_it(self):
+        payload = {
+            "camera": {"camera_id": "camera-a"},
+            "components": {"vision": "simulated-camera"},
+            "targets": [
+                {
+                    "name": "jaka-primary",
+                    "role": "primary",
+                    "robot_adapter": "jaka-dry-run-robot",
+                    "gripper_adapter": "simulated-gripper",
+                }
+            ],
+            "web": {"bind_host": "127.0.0.1", "camera_controls_enabled": True},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "jaka-preview.json"
+            config_path.write_text(json.dumps(payload), encoding="utf-8")
+            preview = load_vision_preview_config(str(config_path))
+            self.assertIsNone(preview.jaka)
+            self.assertIsNone(preview.jaka_control_settings)
+            self.assertFalse(preview.settings.jaka_controls_enabled)
+
+            payload["web"]["jaka_controls_enabled"] = True
+            config_path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "jaka_control is required"):
+                load_vision_preview_config(str(config_path))
+
+            payload["jaka_control"] = {"target_name": "jaka-primary"}
+            config_path.write_text(json.dumps(payload), encoding="utf-8")
+            preview = load_vision_preview_config(str(config_path))
+            self.assertIsInstance(preview.jaka, JakaDryRunRobotAdapter)
+            self.assertEqual("jaka-primary", preview.jaka_control_settings.target_name)
+            self.assertFalse(preview.jaka.started)
+
+    def test_jaka_control_requires_loopback_and_a_primary_target(self):
+        payload = {
+            "camera": {"camera_id": "camera-a"},
+            "components": {"vision": "simulated-camera"},
+            "targets": [
+                {
+                    "name": "jaka-primary",
+                    "role": "primary",
+                    "robot_adapter": "jaka-dry-run-robot",
+                    "gripper_adapter": "simulated-gripper",
+                }
+            ],
+            "jaka_control": {"target_name": "jaka-primary"},
+            "web": {"bind_host": "0.0.0.0", "jaka_controls_enabled": True},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "jaka-preview.json"
+            config_path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "127.0.0.1"):
+                load_vision_preview_config(str(config_path))
+
+            payload["web"]["bind_host"] = "127.0.0.1"
+            payload["targets"][0]["role"] = "mirror"
+            config_path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "primary target"):
+                load_vision_preview_config(str(config_path))
+
+            payload["targets"][0]["role"] = "primary"
+            payload["jaka_control"]["target_name"] = "missing-target"
+            config_path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "exactly one configured target"):
+                load_vision_preview_config(str(config_path))
+
+    def test_enabled_jaka_controls_cannot_be_exposed_by_cli_host_override(self):
+        settings = WebPreviewSettings(bind_host="0.0.0.0", jaka_controls_enabled=True)
+        with self.assertRaisesRegex(ValueError, "127.0.0.1"):
+            validate_web_settings(settings)
+
+    def test_enabled_gripper_controls_cannot_be_exposed_by_cli_host_override(self):
+        settings = WebPreviewSettings(bind_host="0.0.0.0", gripper_controls_enabled=True)
+        with self.assertRaisesRegex(ValueError, "127.0.0.1"):
+            validate_web_settings(settings)
+
+    def test_pgi_gripper_configuration_does_not_connect_during_preview_build(self):
+        payload = {
+            "camera": {"camera_id": "camera-a"},
+            "components": {"vision": "simulated-camera"},
+            "targets": [
+                {
+                    "name": "pgi-primary",
+                    "role": "primary",
+                    "robot_adapter": "simulated-robot",
+                    "gripper_adapter": "pgi-tcp-gripper",
+                    "gripper_adapter_settings": {"host": "test.invalid"},
+                }
+            ],
+            "gripper_control": {
+                "target_name": "pgi-primary",
+                "open_position": 900,
+                "close_position": 100,
+            },
+            "web": {"bind_host": "127.0.0.1", "gripper_controls_enabled": True},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "pgi-preview.json"
+            config_path.write_text(json.dumps(payload), encoding="utf-8")
+            preview = load_vision_preview_config(str(config_path))
+
+        self.assertIsInstance(preview.gripper, PgiTcpGripperAdapter)
+        self.assertFalse(preview.gripper.started)
 
     def test_enabled_pose_preview_blocks_before_camera_start_when_cuda_is_not_ready(self):
         """Prevent an enabled model pipeline from retrying frames without a supported CUDA runtime."""

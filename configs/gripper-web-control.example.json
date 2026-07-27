@@ -26,26 +26,35 @@
       "role": "primary",
       "robot_adapter": "simulated-robot",
       "gripper_adapter": "simulated-gripper"
-    },
-    {
-      "name": "sim-mirror",
-      "role": "mirror",
-      "robot_adapter": "simulated-robot",
-      "gripper_adapter": "simulated-gripper"
     }
   ],
+  "gripper_control": {
+    "target_name": "sim-primary",
+    "open_position": 900,
+    "close_position": 100,
+    "arm_timeout_seconds": 60.0,
+    "initialization_timeout_seconds": 5.0,
+    "minimum_position": 0,
+    "maximum_position": 1000,
+    "minimum_force_percent": 20,
+    "maximum_force_percent": 30,
+    "minimum_speed_percent": 1,
+    "maximum_speed_percent": 20,
+    "idempotency_cache_size": 128,
+    "idempotency_ttl_seconds": 600.0
+  },
   "safety": {
     "minimum_perception_confidence": 0.7,
     "maximum_perception_age_seconds": 2.0
   },
   "web": {
-    "bind_host": "0.0.0.0",
+    "bind_host": "127.0.0.1",
     "port": 8000,
     "frontend_dist_dir": "src/web/dist",
     "stream_fps": 10,
     "jpeg_quality": 80,
     "capture_retry_seconds": 1.0,
-    "camera_controls_enabled": true,
+    "camera_controls_enabled": false,
     "gripper_controls_enabled": false
   }
 }

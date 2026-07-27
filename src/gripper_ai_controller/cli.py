@@ -102,8 +102,67 @@ async def _read_jaka_joint_positions(args: argparse.Namespace) -> None:
     )
 
 
+async def _jaka_joint_dry_run(args: argparse.Namespace) -> None:
+    """Compile and execute one offline JAKA joint command against in-memory state only."""
+
+    from gripper_ai_controller.bootstrap.runtime_builder import load_jaka_dry_run_target
+    from gripper_ai_controller.domain.models import JointMoveMode, RobotAction, RobotCommand
+
+    target_name, adapter = load_jaka_dry_run_target(args.config_file, args.target)
+    if args.stop:
+        if args.mode is not None or args.speed_rad_per_second is not None:
+            raise ValueError("--mode and --speed-rad-per-second cannot be used with --stop.")
+        command = RobotCommand(action=RobotAction.STOP)
+    else:
+        if args.mode is None or args.speed_rad_per_second is None:
+            raise ValueError(
+                "--mode and --speed-rad-per-second are required with --joint-positions-rad."
+            )
+        try:
+            joint_positions = json.loads(args.joint_positions_rad)
+        except json.JSONDecodeError as error:
+            raise ValueError("--joint-positions-rad must be a JSON array: {0}".format(error))
+        if not isinstance(joint_positions, list):
+            raise ValueError("--joint-positions-rad must be a JSON array.")
+        command = RobotCommand(
+            action=RobotAction.MOVE_JOINTS,
+            joint_positions_rad=tuple(joint_positions),
+            speed=args.speed_rad_per_second,
+            joint_move_mode=JointMoveMode(args.mode),
+        )
+
+    await adapter.startup()
+    try:
+        await adapter.initialize()
+        preview = adapter.preview(command)
+        predicted_status = await adapter.execute(command)
+    finally:
+        await adapter.shutdown()
+
+    print(
+        json.dumps(
+            {
+                "target_name": target_name,
+                "sent_to_hardware": False,
+                "predicted_joint_positions_rad": list(predicted_status.joint_positions_rad),
+                "sdk_preview": {
+                    "method": preview.sdk_method,
+                    "arguments": preview.sdk_arguments,
+                    "source_joint_positions_rad": list(preview.source_joint_positions_rad),
+                    "target_joint_positions_rad": list(preview.target_joint_positions_rad),
+                    "joint_deltas_rad": list(preview.joint_deltas_rad),
+                    "estimated_duration_seconds": preview.estimated_duration_seconds,
+                },
+                "message": "干运行完成，未向真实硬件发送任何命令。",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
 def _web(args: argparse.Namespace) -> None:
-    """Run isolated FastAPI camera preview without constructing the execution runtime."""
+    """Run camera preview and optional local manual device controls without Runtime."""
 
     import uvicorn
 
@@ -310,7 +369,24 @@ def main() -> None:
     )
     jaka_joints.add_argument("--config-file", required=True)
     jaka_joints.add_argument("--target")
-    web = subparsers.add_parser("web", help="Run the isolated camera preview web service.")
+    jaka_dry_run = subparsers.add_parser(
+        "jaka-joint-dry-run",
+        help="Preview a JAKA joint command in memory without loading the SDK or controller.",
+    )
+    jaka_dry_run.add_argument("--config-file", required=True)
+    jaka_dry_run.add_argument("--target")
+    jaka_dry_run_command = jaka_dry_run.add_mutually_exclusive_group(required=True)
+    jaka_dry_run_command.add_argument("--stop", action="store_true")
+    jaka_dry_run_command.add_argument(
+        "--joint-positions-rad",
+        help="A JSON array containing six absolute targets or relative deltas in radians.",
+    )
+    jaka_dry_run.add_argument("--mode", choices=("absolute", "relative"))
+    jaka_dry_run.add_argument("--speed-rad-per-second", type=float)
+    web = subparsers.add_parser(
+        "web",
+        help="Run camera preview and optional local gripper or JAKA control without Runtime.",
+    )
     web.add_argument("--config-file", default="configs/development.json")
     web.add_argument("--host")
     web.add_argument("--port", type=int)
@@ -355,6 +431,8 @@ def main() -> None:
         _image_centering_simulate(args)
     elif args.command == "jaka-joints":
         asyncio.run(_read_jaka_joint_positions(args))
+    elif args.command == "jaka-joint-dry-run":
+        asyncio.run(_jaka_joint_dry_run(args))
     elif args.command == "reload":
         asyncio.run(_reload(args))
     elif args.command == "web":

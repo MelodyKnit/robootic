@@ -34,8 +34,10 @@ frame = await camera.capture()
 
 `RobotStatus` 还必须明确报告 `connected`、`powered` 和 `enabled`。安全策略仅会为已初始化、已连接、已上电、已使能且无故障、无急停的机器人授权未来运动；这些状态不能由规划器伪造。
 
-`jaka/` 是首个真实机器人适配器。它将官方 Python SDK 保留在项目内，并将连接、使能和运动严格分离：默认仅允许连接与遥测读取，任何运动指令均被拒绝。
+`jaka/` 包含真实 `JakaAdapter` 和离线 `JakaDryRunRobotAdapter`。真实适配器将官方 Python SDK 保留在项目内，并将连接、使能和运动严格分离：默认仅允许连接与遥测读取，任何运动指令均被拒绝。干运行适配器不导入 SDK 或打开网络连接，只在内存中用 JAKA Zu 3 软件限位编译和预测六轴关节命令；它通过 `RobotMotionConstraint` 让运行时在授权前复用相同限制，不能作为真机控制实现。
 
 `hikvision/` 是 USB3 Vision 帧源和受限参数适配器。它将 MVS Python 封装与 Windows x64 运行库保留在项目内，并通过独立的 `CameraParameterAdapter` 端口公开固定白名单的运行时参数；不包含感知算法，不接受任意 MVS 节点、触发设置或设备持久化相机配置。网页服务在设备更新成功后才将实际生效值写回显式本机 JSON 的 `camera_parameters`，并在启动和重连的首帧前恢复；适配器本身不调用厂商持久化命令。具体白名单、并发锁和网页访问许可见 [海康适配器说明](hikvision/README.md)。
 
-未来的 DH Robotics 和 CoppeliaSim 实现各自拥有自己的适配器子包。在实现前将其厂商库复制到本项目中；不要从 `documents/` 导入源码资产。
+`pgi/` 使用标准库 socket 封装项目原始资料中已经展示的 PGI TCP 网关协议。它仅支持连接、普通初始化、目标力、目标位置和状态读取；未验证的速度、软件停止和全行程重新标定不会暴露给运行时或网页。具体生命周期、协议校验和真机安全边界见 [PGI TCP 适配器说明](pgi/README.md)。
+
+未来的 CoppeliaSim 实现拥有自己的适配器子包。在实现前将其厂商库复制到本项目中；不要从 `documents/` 动态导入源码资产。

@@ -58,12 +58,13 @@ class SafetyLimits:
 
 @dataclass(frozen=True)
 class WebPreviewSettings:
-    """Validated settings for the browser camera preview and parameter-control server.
+    """Validated settings for the browser preview and explicitly gated controls.
 
     The values originate in a versioned JSON configuration file or explicit CLI
     overrides. Camera parameter writes remain disabled unless a local configuration
     explicitly enables the fixed adapter whitelist. These settings never enable robot
-    or gripper controls, and they do not define persistence paths.
+    or gripper controls unless their independent strict booleans are enabled, and they
+    do not define persistence paths.
     """
 
     bind_host: str = "0.0.0.0"
@@ -73,6 +74,50 @@ class WebPreviewSettings:
     jpeg_quality: int = 80
     capture_retry_seconds: float = 1.0
     camera_controls_enabled: bool = False
+    gripper_controls_enabled: bool = False
+    jaka_controls_enabled: bool = False
+
+
+@dataclass(frozen=True)
+class GripperControlSettings:
+    """Validated limits and target selection for local manual gripper control.
+
+    Network addresses remain adapter settings in the selected target. This object owns
+    only operator-control policy and normalized PGI ranges, so the HTTP layer never
+    accepts device endpoints or arbitrary registers from a browser request.
+    """
+
+    target_name: str
+    open_position: int
+    close_position: int
+    arm_timeout_seconds: float = 60.0
+    initialization_timeout_seconds: float = 5.0
+    minimum_position: int = 0
+    maximum_position: int = 1000
+    minimum_force_percent: int = 20
+    maximum_force_percent: int = 30
+    minimum_speed_percent: int = 1
+    maximum_speed_percent: int = 20
+    idempotency_cache_size: int = 128
+    idempotency_ttl_seconds: float = 600.0
+
+
+@dataclass(frozen=True)
+class JakaControlSettings:
+    """Validated policy for explicit local JAKA joint control from the browser.
+
+    Controller endpoints and adapter-level permissions remain on the selected target
+    inside an ignored local configuration. This object only owns browser-session
+    limits and preview freshness, so HTTP requests cannot alter robot networking,
+    SDK options, or motion limits.
+    """
+
+    target_name: str
+    arm_timeout_seconds: float = 60.0
+    preview_timeout_seconds: float = 10.0
+    source_position_tolerance_rad: float = 0.01
+    idempotency_cache_size: int = 128
+    idempotency_ttl_seconds: float = 600.0
 
 
 @dataclass(frozen=True)

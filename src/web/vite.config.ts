@@ -12,7 +12,8 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [vue()],
     server: {
-      host: '0.0.0.0',
+      // The development proxy could otherwise expose loopback-only hardware controls.
+      host: '127.0.0.1',
       port: 5173,
       strictPort: true,
       proxy: {
@@ -23,7 +24,7 @@ export default defineConfig(({ mode }) => {
       },
     },
     preview: {
-      host: '0.0.0.0',
+      host: '127.0.0.1',
       port: 4173,
       strictPort: true,
     },

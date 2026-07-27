@@ -28,6 +28,7 @@ from gripper_ai_controller.domain.models import (
     CameraCalibration,
     CommandEnvelope,
     ExecutionResult,
+    RobotCommand,
     RuntimeMode,
     SafetyDecision,
     TargetRole,
@@ -129,6 +130,8 @@ class Runtime:
             decision = self.config.safety_policy.evaluate(
                 command, primary_telemetry.robot, primary_telemetry.gripper, perception
             )
+            if decision.allowed and isinstance(command.payload, RobotCommand):
+                decision = primary.evaluate_robot_motion(command.payload, primary_telemetry.robot)
             if not decision.allowed:
                 await self.event_bus.publish(CommandRejected(time.time(), command, decision))
                 return ExecutionResult(command, decision, (), perception)

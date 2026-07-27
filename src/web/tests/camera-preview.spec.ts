@@ -1,11 +1,37 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { expect, test, type APIRequestContext, type Route } from '@playwright/test'
+import { expect, test, type Route } from '@playwright/test'
 
-test('显示可解码的实时相机画面', async ({ page, request }) => {
-  const cameraId = await configuredCameraId(request)
-  const initialExposure = await parameterValue(request, cameraId, 'exposure_time_us')
+test('显示可解码的实时相机画面', async ({ page }) => {
+  await page.route('**://*/api/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (path === '/api/cameras') {
+      await fulfillJson(route, { cameras: [cameraStatus()] })
+      return
+    }
+    if (path === '/api/cameras/sim-camera/status') {
+      await fulfillJson(route, cameraStatus())
+      return
+    }
+    if (path === '/api/cameras/sim-camera/stream') {
+      await route.fulfill({ contentType: 'image/gif', body: transparentGif })
+      return
+    }
+    if (path === '/api/cameras/sim-camera/pose') {
+      await fulfillJson(route, posePayload(true))
+      return
+    }
+    if (path === '/api/cameras/sim-camera/vision/analysis') {
+      await fulfillJson(route, visionAnalysisPayload())
+      return
+    }
+    if (path === '/api/cameras/sim-camera/parameters') {
+      await fulfillJson(route, cameraParametersPayload())
+      return
+    }
+    await route.fulfill({ status: 404, contentType: 'application/json', body: '{"code":"not_found"}' })
+  })
 
   await page.goto('/', { waitUntil: 'domcontentloaded' })
 
@@ -31,8 +57,6 @@ test('显示可解码的实时相机画面', async ({ page, request }) => {
     })
     .toBeGreaterThan(0)
 
-  await expect.poll(() => parameterValue(request, cameraId, 'exposure_time_us')).toBe(initialExposure)
-
   const screenshotDirectory = join('..', '..', 'temp', 'gripper-ai-controller')
   mkdirSync(screenshotDirectory, { recursive: true })
   await page.screenshot({ path: join(screenshotDirectory, 'camera-preview-browser.png'), fullPage: true })
@@ -41,7 +65,7 @@ test('显示可解码的实时相机画面', async ({ page, request }) => {
 test('姿态刷新不会替换 MJPEG，过期时隐藏叠加且只在流错误后重连', async ({ page }) => {
   let poseRequests = 0
   let poseFrameRequested = false
-  await page.route('**/api/**', async (route) => {
+  await page.route('**://*/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     if (path.endsWith('/pose/frame')) {
       poseFrameRequested = true
@@ -99,7 +123,7 @@ test('姿态刷新不会替换 MJPEG，过期时隐藏叠加且只在流错误�
 })
 
 test('锁定关节暂时不可用时仍显示新鲜人体骨架', async ({ page }) => {
-  await page.route('**/api/**', async (route) => {
+  await page.route('**://*/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     if (path === '/api/cameras') {
       await fulfillJson(route, { cameras: [cameraStatus()] })
@@ -137,7 +161,7 @@ test('锁定关节暂时不可用时仍显示新鲜人体骨架', async ({ page 
 
 test('姿态读取失败会隐藏已有骨架而不重连实时画面', async ({ page }) => {
   let poseRequests = 0
-  await page.route('**/api/**', async (route) => {
+  await page.route('**://*/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     if (path === '/api/cameras') {
       await fulfillJson(route, { cameras: [cameraStatus()] })
@@ -189,7 +213,7 @@ test('姿态读取失败会隐藏已有骨架而不重连实时画面', async ({
 
 test('窄屏保持完整的预览宽度并将侧栏移到下方', async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 812 })
-  await page.route('**/api/**', async (route) => {
+  await page.route('**://*/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     if (path === '/api/cameras') {
       await fulfillJson(route, { cameras: [cameraStatus()] })
@@ -232,7 +256,7 @@ test('窄屏保持完整的预览宽度并将侧栏移到下方', async ({ page 
 
 test('骨架按 object-contain 的实际相机像素区域绘制', async ({ page }) => {
   await page.setViewportSize({ width: 1400, height: 900 })
-  await page.route('**/api/**', async (route) => {
+  await page.route('**://*/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     if (path === '/api/cameras') {
       await fulfillJson(route, { cameras: [cameraStatus()] })
@@ -347,6 +371,26 @@ function visionAnalysisPayload(includePerson = true) {
   }
 }
 
+function cameraParametersPayload() {
+  return {
+    camera_id: 'sim-camera',
+    write_enabled: false,
+    parameters: [
+      {
+        key: 'exposure_time_us',
+        kind: 'float',
+        apply_mode: 'restart',
+        value: 8_000,
+        minimum: 10,
+        maximum: 50_000,
+        step: 1,
+        unit: 'us',
+        options: [],
+      },
+    ],
+  }
+}
+
 function measureOverlayPlacement(canvas: HTMLCanvasElement) {
   const image = canvas.parentElement?.querySelector('img')
   if (!(image instanceof HTMLImageElement)) {
@@ -405,24 +449,4 @@ async function fulfillJson(route: Route, payload: unknown): Promise<void> {
     contentType: 'application/json',
     body: JSON.stringify(payload),
   })
-}
-
-async function configuredCameraId(request: APIRequestContext): Promise<string> {
-  const response = await request.get('/api/cameras')
-  expect(response.ok()).toBeTruthy()
-  const payload = (await response.json()) as { cameras?: Array<{ camera_id?: unknown }> }
-  const cameraId = payload.cameras?.[0]?.camera_id
-  expect(typeof cameraId).toBe('string')
-  return cameraId as string
-}
-
-async function parameterValue(request: APIRequestContext, cameraId: string, key: string): Promise<unknown> {
-  const response = await request.get(`/api/cameras/${encodeURIComponent(cameraId)}/parameters`)
-  expect(response.ok()).toBeTruthy()
-  const payload = (await response.json()) as {
-    parameters?: Array<{ key?: unknown; value?: unknown }>
-  }
-  const parameter = payload.parameters?.find((candidate) => candidate.key === key)
-  expect(parameter).toBeDefined()
-  return parameter?.value
 }

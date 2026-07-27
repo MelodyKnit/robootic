@@ -1,156 +1,150 @@
-# 夹爪 AI 控制器
+# 夹爪 AI 控制器 (Gripper AI Controller)
 
-本项目是一个基于 Python 3.7 的视觉引导机器人及夹爪工作站基础框架。其运行时采用模块化的分离架构：小型核心负责生命周期、类型化事件、安全授权和指令调度；适配器和插件均为可独立更新的项目内模块。
+本项目是一个基于 Python 3.7 的视觉引导机器人及夹爪工作站基础保障框架。其采用模块化分离架构，小型核心（Core）负责生命周期、类型化事件、安全授权和指令调度，而感知与控制的具体实现则由适配器（Adapters）及插件（Plugins）承载。
 
-默认开发图是安全自洽的：使用内存中的机器人、夹爪、镜像、相机、规划和感知组件，从不导入厂商 SDK、打开端口、采集真实图像或控制物理设备。
+⚠️ **安全警示 (Crucial Safety Warning)**
+* **硬件动作防碰撞**：包含机械臂上电（`robot.power_on()`、`enable_robot()`）、直线/关节运动、以及夹爪强力夹紧动作的测试与演示，必须在清空工作区的前提下进行，并配备现场独立物理急停装置。
+* **网页远程控制隔离**：在配置中启用网页夹爪或机械臂手动控制时，配置文件的 `web.bind_host` 必须限制为 `127.0.0.1` 环回物理接口。若检测到任何非环回绑定，服务将拒绝启动，避免未经授权的局域网客户端直接操作现场实体设备。
+* **开发图安全自洽性**：默认的开发拓扑使用内存模拟的虚拟设备（机器人、夹爪、相机适配器），在不改变配置至物理端口或真实 SDK 时，绝不会导入外部 SDK 或操作硬件实物。
 
-## 环境要求
+---
 
-- Conda 环境：`robotic`
-- Python：`>=3.7,<3.8`，64 位
-- 包管理器：Poetry
-- 仿真通信依赖：`pyzmq==25.1.2`、`cbor==1.0.0`
-- 相机预览运行依赖：`FastAPI==0.99.1`、`uvicorn==0.22.0`、`Pillow==9.5.0`
-- 人体姿态运行依赖：`torch==1.13.1`、`torchvision==0.14.1`，固定使用 PyTorch CUDA 11.7 软件源
-- 前端构建环境：Node.js 20 或更高版本、pnpm 10
+## 1. 软件环境与包管理 (Environments & SDKs)
 
-Python 版本限制有意比 `^3.7` 更严格：本机复制的 JAKA `jkrc` 扩展针对 Python 3.7 64 位编译。
+物理节卡机械臂 `jkrc` 二进制扩展模块与动态链接库原生在 Python 3.7 (64-bit) 下编译。为确保通联层向下兼容，本项目固定使用 Python 3.7。
 
-CoppeliaSim 4.10 自带的 `coppeliasim-zmqremoteapi-client` 2.0.4 发布包要求 Python 3.8 或更高，因此不能直接加入本项目。已安装的 `pyzmq` 与 `cbor` 是其 ZeroMQ 协议所需的 Python 3.7 兼容传输依赖；后续实现 `CoppeliaSimAdapter` 时，必须将与本机 CoppeliaSim 版本匹配的官方客户端源码复制到本子项目内，不得从全局安装目录导入。
+### 基础环境要求
+* **Python 隔离环境**：Conda 环境 `robotic`（包含 `Python >=3.7,<3.8`，64位）
+* **包管理器**：Poetry 1.8.5（需确保 `virtualenv` 固定为 `20.26.6`，`packaging` 固定为 `23.2`，以规避 Python 3.7 兼容性解析错误）。**切勿使用 Poetry 2.x 进行锁定。**
+* **图像与服务依赖**：`pyzmq==25.1.2`、`cbor==1.0.0`、`FastAPI==0.99.1`、`uvicorn==0.22.0`、`Pillow==9.5.0`
+* **姿态学习依赖**：`torch==1.13.1` 与 `torchvision==0.14.1`（固定锁定 PyTorch CUDA 11.7 软件源包）
+* **Web 前端环境**：Node.js 20+ 以及 pnpm 10
 
-## 运行
+### 官方 SDK 引入规范
+由于再分发授权约束，各硬件厂商 SDK 的物理资产不打包随 Git 提交。部署真机前，需从静态资料库 [documents/](../../documents) 将相应依赖复制到子项目的适配器目录中（**严禁跨目录直接在代码中引用外部共享库**）：
+* **JAKA SDK**：需将 `jkrc.pyd` 与 `jakaAPI.dll` 复制放置在 [src/gripper_ai_controller/adapters/jaka/](src/gripper_ai_controller/adapters/jaka) 目录下。
+* **Hikvision SDK**：需将海康官方 MVS Python 封装和 Windows 运行库复制放置在 [src/gripper_ai_controller/adapters/hikvision/](src/gripper_ai_controller/adapters/hikvision) 目录下。
 
-```powershell
-conda activate robotic
-cd projects/gripper-ai-controller
-poetry install
-poetry run python -m gripper_ai_controller run --config-file configs/development.json --objective "Pick the detected workpiece"
-poetry run python -m gripper_ai_controller run --config-file configs/tool-camera.json
-poetry run python -m gripper_ai_controller reload --config-file configs/development.json --module gripper_ai_controller.plugins.audit
-poetry run gripper-ai-controller jaka-joints --config-file localstore/jaka-hardware.local.json --target jaka-primary
-poetry run python -m unittest discover -s tests -v
-python scripts/check_submission_paths.py
+---
+
+## 2. 系统组件架构 (Architecture & Directory Layout)
+
+本项目贯彻“高内聚低耦合”原则，各模块承担明确职责：
+
+```
+├── configs/          # 版本化运行配置模版。默认关闭硬件使能与外网绑定
+├── docs/             # 业务设计及组件契约说明 ── 见 [docs/architecture.md](docs/architecture.md)
+├── data/             # 随仓提交的小型测试样本、视觉 Fixture 集
+├── localstore/       # 被 .gitignore 忽略的本地标定、真实 IP、私有覆盖与模型权重
+│   ├── models/       # 人体姿态权重存放目录
+│   └── packages/     # 离线下载的 wheel 包受控例外包
+├── logs/             # 运行期产生的系统日志与标定记录（被 Git 忽略）
+│   └── work/         # 开发者工作日志（按 YYYYMMDDHHmmss-内容.md 命名）
+├── src/              # 核心源代码包
+│   ├── gripper_ai_controller/
+│   │   ├── bootstrap/      # 运行时环境的构建器与配置校验器
+│   │   ├── core/           # 运行时调度核心、事件总线、任务目标 ── 见 [src/gripper_ai_controller/core/README.md](src/gripper_ai_controller/core/README.md)
+│   │   ├── adapters/       # 基础物理/仿真硬件的驱动解耦层 ── 见 [src/gripper_ai_controller/adapters/README.md](src/gripper_ai_controller/adapters/README.md)
+│   │   ├── plugins/        # 独立的路径规划、控制算法或策略过滤器
+│   │   ├── pose/           # 姿态估算与运动关联模块 ── 见 [src/gripper_ai_controller/pose/README.md](src/gripper_ai_controller/pose/README.md)
+│   │   ├── vision/         # 清晰度/亮度/成像质量评估层 ── 见 [src/gripper_ai_controller/vision/README.md](src/gripper_ai_controller/vision/README.md)
+│   │   └── web/            # 局域网调试与设备人工操作服务后端 ── 见 [src/gripper_ai_controller/web/README.md](src/gripper_ai_controller/web/README.md)
+│   └── web/          # Vue 3 / Vite 调试前端 ── 见 [src/web/README.md](src/web/README.md)
+├── tests/            # 单元与集成测试集合（基于 Python 标准 unittest）
+└── scripts/          # 本地自测、格式校验脚本工具
 ```
 
-`[project.dependencies]` 是标准依赖声明；`[tool.poetry.dependencies]` 保留相同版本，供 Python 3.7 兼容的 Poetry 1.8.5 运行器使用。由于 Python 3.7 不兼容 Poetry 2.3.4 的解释器探测依赖，Poetry 1.8.5 运行器应将其 `packaging` 固定为 23.2、`virtualenv` 固定为 20.26.6。项目依赖仍必须通过 Poetry 安装，不得使用裸 `pip` 写入 `robotic` 环境。
+---
 
-若本机 Poetry 运行器在目标 Python 3.7 的 wheel 标签探测中报出 `packaging` 语法错误，可作为一次性的受控例外：从锁定的官方 PyTorch CUDA 11.7 地址下载精确 wheel，核验官方索引给出的 SHA-256 后放入 `localstore/packages/`，再使用 `python -m pip install --no-index --no-deps` 安装该单一离线文件。该例外仅用于已锁定的 CUDA Torch 运行时，不能用于普通项目依赖，不修改 `pyproject.toml` 或 `poetry.lock`，安装后必须运行 `gripper-ai-controller gpu-check --require-torch` 验证。
+## 3. 标准操作与常用命令 (CLI Usage Handbook)
 
-`reload` 仅在开发模式下可用。生产配置在有明确的本地硬件适配器实现之前，刻意保持"故障关闭"状态。
+在终端已执行并激活 Conda 环境 `robotic` 的前提下，在项目根目录下，以下为标准的指令集：
 
-## 相机网页预览
-
-网页预览是独立的相机服务，不会创建 `Runtime`、执行目标、安全策略、JAKA 连接或夹爪连接。它只启动配置中的一个 `VisionAdapter`，以单一采集循环把最新帧保留在内存中，并将同一 JPEG 帧复用给快照和多个 MJPEG 浏览器连接。主画面始终使用连续 MJPEG，不会因姿态结果切换成静态 JPEG；姿态来源帧与最新预览帧相差超过 `0.35` 秒时只隐藏骨架，实时画面继续播放。不记录或展示相机帧序号，也不写入磁盘。
-
-先构建 Vue 前端，再通过显式 JSON 配置启动服务：
-
+### 3.1 环境检视与权重整备
 ```powershell
-pnpm --dir src/web install
-pnpm --dir src/web build
-poetry run gripper-ai-controller web --config-file configs/development.json
-```
-
-默认服务绑定 `0.0.0.0:8000`，浏览器访问 `http://本机地址:8000/`。可使用 `--host`、`--port` 和 `--frontend-dist-dir` 覆盖对应配置值；它们均不会写回配置文件。开发前端可在 `src/web/` 中执行 `pnpm dev`，Vite 会将 `/api` 代理到本机 `8000` 端口。
-
-预览接口包括 `GET /api/cameras`、`GET /api/cameras/{camera_id}/status`、`GET /api/cameras/{camera_id}/frame` 和 `GET /api/cameras/{camera_id}/stream`。海康适配器还可以公开固定白名单的相机参数：`GET /api/cameras/{camera_id}/parameters` 用于读取实际设备能力，`PATCH /api/cameras/{camera_id}/parameters/{parameter_key}` 只允许立即生效参数，`POST /api/cameras/{camera_id}/parameters/apply` 用于提交需要暂停取流的参数并自动恢复采集。设备成功应用后，服务会将实际生效值写回显式传入 JSON 配置根对象的 `camera_parameters`；服务启动或相机重连后，会在首帧前恢复该对象中的参数。
-
-版本化 `configs/` 中的海康文件仅是模板，默认将 `web.camera_controls_enabled` 设为 `false`。真实设备写入只能在被 Git 忽略的 `localstore/` 本机配置中显式设为 `true`；被传入 `--config-file` 的本机 JSON 也是相机参数持久化的唯一写入目标。若设备已成功应用参数但配置写回失败，接口会明确报告“设备已生效、配置未保存”的失败，操作者应修复本机文件权限或内容后重新提交。服务绑定 `0.0.0.0` 且没有认证、TLS、来源限制或访问审计；一旦启用参数写入，受信任局域网中的访问者可以修改已公开的相机参数，因此绝不能暴露到互联网。无论该开关如何设置，网页服务都不提供机器人或夹爪控制接口。
-
-使用实物海康 USB 相机时，先将 `configs/hikvision-usb.example.json` 复制到 `localstore/`，填写本机标定标识；只有系统枚举到一台相机时才可省略序列号。该配置不应提交。详细接口、重试和图像格式规则见 [相机网页预览后端说明](src/gripper_ai_controller/web/README.md)。
-
-## 人体关节与骨架预览
-
-人体姿态是网页预览中的独立视觉能力，只处理相机帧和浏览器元数据，不构造 `Runtime`，不连接 JAKA、夹爪或任何运动接口。首版使用单人模式的 COCO 17 关节模型：页面可选择锁定关节，默认 `right_wrist`；当人物、目标关节或相机帧不满足置信度要求时，结果立即失效，页面不会继续使用旧坐标。
-
-当同一锁定关节在两个连续有效帧中可见时，`/pose` 还会提供归一化图像坐标的位移、速度和“正在运动”状态。首帧按置信度选择主人体，后续帧必须通过人体框 IoU 或中心距离关联到同一人；关联失败、目标切换、人员丢失、低置信度、非递增时间戳或超出最大采集间隔时都会清除运动基线，避免把不同人或停顿后的画面误判为移动。默认人员阈值为 `0.80`，默认运动速度阈值为 `0.04` 个归一化图像坐标/秒。该状态只用于网页观察，既不是三维速度，也不会生成机器人、夹爪或相机运动指令。
-
-先执行只读 GPU 检查，再通过 Poetry 安装固定的 CUDA 依赖：
-
-```powershell
-poetry run gripper-ai-controller gpu-check
-poetry install
+# 1. GPU 及 PyTorch CUDA 推理就绪状态检视
 poetry run gripper-ai-controller gpu-check --require-torch
+
+# 2. 下载人体骨架检测网络所使用的 Keypoint R-CNN 框架权重
 poetry run gripper-ai-controller pose-download-weights --weights-file localstore/models/keypointrcnn_resnet50_fpn_coco.pth
 ```
 
-将 `configs/pose-preview.example.json` 复制到 `localstore/pose-preview.json`，填写实际相机设置、`weights_path` 并将 `pose.enabled` 设为 `true` 后启动网页服务。启用姿态时，服务会在启动前要求 NVIDIA 驱动和 CUDA 11.7 Torch 均可用，绝不回退到 CPU。浏览器选择的关节只会原子写回显式传入的本机 JSON 配置。
-
-单色海康帧会由 Pillow 原生路径复制为三个相同亮度输入通道，因此模型可推理但不会获得真实颜色信息。为降低 2448×2048 等高分辨率输入的延迟，推理只处理最长边 `768` 的等比缩图，并将关节坐标映射回原始像素坐标；默认姿态频率为 `2 FPS`，相机采集与 MJPEG 不会等待模型完成。单一相机只输出 2D 图像坐标，不能直接驱动机械臂跟随。机械臂带动相机的后续工作必须另行实现标定、3D/图像伺服、速度与工作空间限制、目标丢失停机、仿真验证和明确真机授权。实现与 API 说明见 [姿态感知包说明](src/gripper_ai_controller/pose/README.md)。
-
-## 分阶段成像与人体识别
-
-在启用任何跟随或控制设计之前，网页预览会对最多每秒一帧的缩采样图计算分辨率、像素格式、亮度均值、对比度和清晰度警告，并复用 Keypoint R-CNN 已输出的人员框和 COCO 17 关节。`GET /api/cameras/{camera_id}/vision/analysis` 只读取内存缓存，不触发新的取帧或推理；无人或姿态过期时页面仍显示连续 MJPEG，只有新鲜姿态才在其上绘制骨架，避免慢速推理造成画面冻结或错位。
-
-公开的离线素材位于 [data/vision-fixtures/](data/vision-fixtures/README.md)，覆盖完整人体、上半身、局部遮挡、无人和低亮度场景。通过 GPU 预检且本机权重已存在后，可运行：
-
+### 3.2 模拟与干跑 (Dry Run / Simulation)
 ```powershell
-poetry run gripper-ai-controller gpu-check --require-torch
-poetry run gripper-ai-controller vision-evaluate --config-file configs/vision-evaluation.example.json --report-file temp/gripper-ai-controller/vision-evaluation/report.json --save-overlays
-```
+# 1. 运行系统主目标指令（默认使用 configs/development.json 安全模拟器）
+poetry run python -m gripper_ai_controller run --config-file configs/development.json --objective "Pick the detected workpiece"
 
-离线命令只读取本地权重和已校验哈希的公开图片，不创建相机、网页、机器人、夹爪或运动调度。完整实现、验收门槛和模型扩展边界见 [视觉分析包说明](src/gripper_ai_controller/vision/README.md)。
+# 2. 对节卡机械臂关节发送模拟指令干手预览（不连接网路及 SDK）
+poetry run gripper-ai-controller jaka-joint-dry-run --config-file configs/jaka-joint-dry-run.example.json --target jaka-dry-run-primary --joint-positions-rad "[0.1, 0.0, 0.0, 0.0, 0.0, 0.0]" --mode absolute --speed-rad-per-second 0.5
 
-## 图像居中虚拟仿真
-
-`image-centering-simulate` 在公开图片中识别当前锁定关节，并用纯内存的六轴虚拟模型计算“让该关节向画面中心收敛”时的预测关节变化。默认模板使用 `full-body-front` 的 `right_wrist`，并按确定性 `Mono8` 路径运行 Keypoint R-CNN，因此可先验证单色成像输入、关节定位、误差方向、单步限幅、虚拟关节限位与收敛过程。
-
-```powershell
+# 3. 图像中心收敛虚拟算法伺服仿真
 poetry run gripper-ai-controller image-centering-simulate --config-file configs/image-centering-simulation.example.json
 ```
 
-输出固定写入控制台，包括初始/预测目标坐标、每一步参与变化的虚拟关节、完整六轴状态和停止原因。`simulation_only=true` 表示命令没有创建相机、网页、`Runtime`、JAKA、夹爪、网络客户端或机器人指令；它不会执行真实或仿真软件中的机械臂运动。
+### 3.3 离线评估与测试自检
+```powershell
+# 1. 对本地测试集（Fixture）进行姿态推理质量的综合离线评价
+poetry run gripper-ai-controller vision-evaluate --config-file configs/vision-evaluation.example.json --report-file temp/gripper-ai-controller/vision-evaluation/report.json --save-overlays
 
-纯算法会话也可按采集时间顺序接收同一相机、同一关节的后续二维观测，在模拟人物手部位移后重新计算居中修正；重复时间戳、跨相机或跨关节输入会被拒绝。当前命令只使用单张公开图片验证这条计算链，不订阅真实相机或网页姿态流。
+# 2. 热重载开发模块测试（动态重新加载插件等）
+poetry run python -m gripper_ai_controller reload --config-file configs/development.json --module gripper_ai_controller.plugins.audit
 
-虚拟模型的二维雅可比仅用于离线数学验收，不是 JAKA 运动学、工具相机标定或碰撞仿真。未来将它接入真机仍需相机内参、手眼标定、真实运动学和可达性、在线图像反馈、速度/加速度/工作空间/人机距离限制、丢失目标停机与 `Runtime` 的安全授权。详细设计和扩展边界见 [图像居中仿真说明](src/gripper_ai_controller/image_servo_simulation/README.md)。
+# 3. 运行全单元与集成测试套件
+poetry run python -m unittest discover -s tests -v
 
-## 提交前路径检查
+# 4. 提交代码前的绝对路径检查自律脚本
+python scripts/check_submission_paths.py
+```
 
-`python scripts/check_submission_paths.py` 只扫描 Git 已跟踪或未被忽略的新文件，并在发现文件系统绝对路径时以非零状态退出。它检查 Windows 盘符路径、UNC 路径、`file:` 后接两个斜杠的 URI 和常见 POSIX 绝对路径；URL、CoppeliaSim 场景对象路径和相对路径不会被视为违规。
+### 3.4 物理通联测试（真机调试）
+```powershell
 
-本地日志、真实标定、采集数据和本机覆盖内容分别位于 `logs/` 与 `localstore/`，均不参与 Git 提交。
+poetry run gripper-ai-controller jaka-joints --config-file localstore/jaka-hardware.local.json --target jaka-primary
+```
 
-## 组件模型
+---
 
-- `core/`：异步运行时、注册表、类型化事件总线、目标调度器和重载生命周期。
-- `adapters/`：机器人、夹爪或相机集成。适配器负责获取数据或执行已授权指令，不含规划算法。
-- `plugins/`：感知、规划和审计模块。插件可观察类型化事件并提出规范化指令，但不可调度硬件指令。
-- `configs/`：版本化 JSON 运行配置文件的统一入口。
-- `bootstrap/`：读取、校验 JSON 并组装运行时图的 Python 代码。
-- `data/`：应随代码提交的小型、非敏感、可复现数据和模板。
-- `localstore/`：Git 忽略的本机运行数据、标定结果、采集物和私密覆盖。
+## 4. 人机调试 Web 服务 (Camera & Device Controls Server)
 
-一个执行目标包含一个机器人适配器和一个夹爪适配器。其中一个目标是 `primary`（主目标），其遥测数据具有权威性。镜像目标接收相同的已批准指令 ID，并通过主目标遥测数据进行修正，从而允许未来的 CoppeliaSim 数字孪生安全地跟随真实执行。
+Web 调试服务提供海康相机只读预览、图像质量与人体骨架叠加实时显示，以及经显式本机授权的机械臂、电装夹爪临时单步操作配置。
 
-## JAKA 安全接入
+### 前端构建与服务拉起
+在拉起服务前，需首先构建 Vue 3 前端静态页面资产：
+```powershell
+# 构建前端应用程序
+pnpm --dir src/web install
+pnpm --dir src/web build
 
-项目内的 `adapters/jaka/` 提供 JAKA Python SDK 2.1.2 的连接、只读状态和只读关节角适配器。它已注册为可选的机器人适配器，但不在默认开发配置中启用，也不接受版本化配置中的真实 IP 地址。`configs/jaka-hardware.example.json` 只提供占位模板；真实副本必须保存在 `localstore/`。`jaka-joints` 只执行 `login -> get_joint_position -> logout` 并输出 J1 至 J6 的弧度和角度制数值；它不会上电、使能、去使能或移动。该数据是关节空间角度，不能代替实体关节的三维坐标。运动指令在适配器内被拒绝。真实使能必须通过本机私有配置显式允许，并要求控制器已人工上电、急停可用且工作区已清空。`jkrc.pyd` 与 `jakaAPI.dll` 必须从官方 SDK 复制到该适配器目录，但因再分发授权未确认，Git 与 Poetry 构建均不会包含它们。
+# 启动模拟调试服务界面
+poetry run gripper-ai-controller web --config-file configs/development.json
 
-详细边界和使用方式见 [JAKA 适配器说明](src/gripper_ai_controller/adapters/jaka/README.md)。
+# 启动包含物理夹爪人工控制界面的网页端（加载 localstore 下的本地环回 IP 配置）
+poetry run gripper-ai-controller web --config-file localstore/gripper-web-control.local.json
+```
 
-## 海康 USB 相机接入
+### 4.1 海康相机网页自适应控制
+海康 USB 工业相机在启动时被独占拉起，以单一采集循环推送 MJPEG 服务；其各项曝光及帧率参数白名单见于 [相机说明](src/gripper_ai_controller/adapters/hikvision/README.md)。
+1. 将 `configs/hikvision-usb.example.json` 拷贝至 `localstore`。
+2. 真实设备变更的相机参数会自动由 Web 后端持续原子写回所配置的本机配置文件中。
 
-项目内的 `adapters/hikvision/` 提供 MVS USB3 Vision 帧源和受限参数适配器。它在启动时打开指定相机，在 `capture()` 时复制原始帧，并在关闭时释放 MVS 资源。默认 `frame_delivery_mode` 为 `latest_only`：在相机句柄已打开、MVS 开始取流前通过 MVS 设置策略，使后续取帧清除旧队列并交付最新图像，避免网页预览追赶 FIFO 历史帧。已连接 USB 相机在开始取流后设置策略会返回调用顺序错误，因此不能延后该调用。只有网页服务经本机配置显式允许时，它才会通过固定白名单读取或修改自动曝光、曝光时间、自动增益、增益、帧率开关、帧率和像素格式；不会公开任意 MVS 节点、触发模式或设备持久化的 UserSet 设置。像素格式属于暂停取流后应用并自动恢复采集的参数。网页服务会在设备更新成功后把实际生效值写回启动时显式传入 JSON 的 `camera_parameters`，并在启动或重连的首帧前恢复；这不是对相机设备执行 `FeatureSave` 或 `UserSetSave`。版本化配置只提供占位模板，真实相机序列号、标定标识和可写本机配置必须保存于 `localstore/`。MVS Python 封装和 Windows 运行库必须从官方安装包复制到该适配器目录；在取得再分发授权前，它们仅作为本机资产，不随 Git 或 Poetry 构建发布。
+### 4.2 电装网页夹爪授权控制 (DH PGI)
+真实夹爪的物理参数需存放于 `localstore/gripper-web-control.local.json` 配置的 `gripper_control` 子段中：
+* 网页控制具备 60 秒的会话安全令牌限制。
+* 使用物理独立急停以备机械动作卡阻，不要依赖 Web 锁屏按钮。
+* 真机状态中的“已设定目标位置”来自已验证的目标寄存器，不是实时物理位置反馈。
+* API 接口说明详情参见 [网页服务说明](src/gripper_ai_controller/web/README.md) 及 [PGI 适配器文档说明](src/gripper_ai_controller/adapters/pgi/README.md)。
 
-详细边界、SDK 文件和验证方式见 [海康适配器说明](src/gripper_ai_controller/adapters/hikvision/README.md)。
+### 4.3 节卡六轴网页授权控制
+机械臂真实物理地址填入 `localstore/jaka-web-control.local.json` 中所选 `targets` 项的 `robot_adapter_settings.controller_ip`；`jaka_control` 子段只保存网页控制策略。
+* **双重验证保护**：在对机械臂关节点动发送前，需首先生成带有 `preview_id` 的服务端预览帧，随后再次确认现场安全方可触发实体阻隔运动。
+* 网页手动控制绝对不具备对机械臂的 `power_on()`（开机上电能力）。测试前务必由专家完成工具负载及安装姿态的手控校验。
+* 详情说明参见 [JAKA 适配器说明](src/gripper_ai_controller/adapters/jaka/README.md) 与 [网页服务说明](src/gripper_ai_controller/web/README.md)。
 
-## 视觉边界
+---
 
-`VisionAdapter` 仅返回 `ImageFrame` 数据。感知插件将帧转换为检测到的物体、2D 框、置信度、3D 姿态和机器人基座抓取候选。
+## 5. 组件扩展示例 (How-to: Add Customized Components)
 
-内置确定性插件支持两种标定拓扑：
-
-- 固定外部相机：`camera -> robot_base`；
-- 工具端安装相机：`camera -> tool0`，结合抓取时的机器人位姿进行合成。
-
-只有经过标定、时效内、置信度足够的 `robot_base` 抓取候选才能进入规划和安全授权阶段。
-
-## 添加真实组件
-
-1. 将所需的 JAKA、DH Robotics、Hikvision 或 CoppeliaSim SDK 文件复制到本子项目中。严禁从 `documents/` 导入。
-2. 在专用的 `adapters/<provider>/` 包中实现相应的生命周期适配器。
-3. 为其赋予唯一的 `ComponentManifest` 并在 `configs/` 的 JSON 文件中显式启用。
-4. 将所有运动路径置于 `Runtime` 和 `SafetyPolicy` 保护之下。
-5. 在允许物理连接之前，添加离线测试和一个显式启用的硬件冒烟测试。
-
-有关事件和生命周期合约，请参见 [architecture.md](docs/architecture.md)。
+1. 将物理 JAKA、DH 夹爪或海康相机的二进制/源码 SDK 文件拷贝至本子项目指定的 Adapter 对应文件夹下（严禁直接跨目录引用 `documents/`）。
+2. 在对应的 [src/gripper_ai_controller/adapters/](src/gripper_ai_controller/adapters) 包下继承虚基类，实现生命周期方法。
+3. 编写所实现组件的 `ComponentManifest`，以加入引导启动器。
+4. 使用 `tests/` 目录下的模拟测试模板编写相应的单体与冒烟自检测试用例。
