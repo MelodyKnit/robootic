@@ -498,14 +498,19 @@ class JakaAdapterTests(unittest.TestCase):
                 self.assertFalse(move_task.done())
 
                 status_task = asyncio.create_task(adapter.get_status())
+                shutdown_task = asyncio.create_task(adapter.shutdown())
                 await asyncio.sleep(0.02)
                 self.assertFalse(status_task.done())
+                self.assertFalse(shutdown_task.done())
+                self.assertNotIn("logout", client.calls)
 
                 client.release_joint_move.set()
                 with self.assertRaises(asyncio.CancelledError):
                     await move_task
                 status = await asyncio.wait_for(status_task, timeout=0.5)
                 self.assertEqual(command.joint_positions_rad, status.joint_positions_rad)
+                await asyncio.wait_for(shutdown_task, timeout=0.5)
+                self.assertEqual("logout", client.calls[-1])
                 self.assertEqual(1, len(client.joint_move_calls))
             finally:
                 client.release_joint_move.set()
@@ -515,7 +520,8 @@ class JakaAdapterTests(unittest.TestCase):
                         await move_task
                     except asyncio.CancelledError:
                         pass
-                await adapter.shutdown()
+                if adapter.started:
+                    await adapter.shutdown()
 
         self.run_async(scenario())
 

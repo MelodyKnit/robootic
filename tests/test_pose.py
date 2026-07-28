@@ -316,20 +316,36 @@ class PoseFrameAndTrackingTests(unittest.TestCase):
         """Ensure slow GPU work never turns camera captures into an unbounded FIFO queue."""
 
         async def scenario():
+            accepted_sources = []
+
+            async def retain_source(captured_at):
+                """Record only a frame selected as an actual model input."""
+
+                accepted_sources.append(captured_at)
+
             estimator = BlockingPoseEstimator()
             tracker = PoseTrackingService(
                 "camera-a",
                 PoseTrackingSettings(enabled=True, max_inference_fps=30),
                 estimator,
             )
-            await tracker.submit_frame(make_frame(captured_at=1.0))
+            await tracker.submit_frame(
+                make_frame(captured_at=1.0),
+                lambda: retain_source(1.0),
+            )
             for _ in range(100):
                 if estimator.started.is_set():
                     break
                 await asyncio.sleep(0.01)
             self.assertTrue(estimator.started.is_set())
-            await tracker.submit_frame(make_frame(captured_at=2.0))
-            await tracker.submit_frame(make_frame(captured_at=3.0))
+            await tracker.submit_frame(
+                make_frame(captured_at=2.0),
+                lambda: retain_source(2.0),
+            )
+            await tracker.submit_frame(
+                make_frame(captured_at=3.0),
+                lambda: retain_source(3.0),
+            )
             estimator.release.set()
             for _ in range(100):
                 snapshot = await tracker.snapshot()
@@ -339,6 +355,7 @@ class PoseFrameAndTrackingTests(unittest.TestCase):
             await tracker.shutdown()
 
             self.assertEqual([1.0, 3.0], estimator.captured_at_values)
+            self.assertEqual([1.0, 3.0], accepted_sources)
             self.assertEqual(3.0, snapshot.captured_at)
             self.assertEqual(1, tracker._inference_executor._max_workers)
 

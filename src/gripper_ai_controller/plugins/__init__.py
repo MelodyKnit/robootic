@@ -3,5 +3,11 @@
 from gripper_ai_controller.plugins.audit import AuditPlugin
 from gripper_ai_controller.plugins.demo_planner import DemonstrationPlannerPlugin
 from gripper_ai_controller.plugins.deterministic_perception import DeterministicPerceptionPlugin
+from gripper_ai_controller.plugins.visual_pose_analysis import VisualPoseAnalysisPlugin
 
-__all__ = ["AuditPlugin", "DemonstrationPlannerPlugin", "DeterministicPerceptionPlugin"]
+__all__ = [
+    "AuditPlugin",
+    "DemonstrationPlannerPlugin",
+    "DeterministicPerceptionPlugin",
+    "VisualPoseAnalysisPlugin",
+]

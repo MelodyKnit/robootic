@@ -7,6 +7,7 @@ import secrets
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
+from gripper_ai_controller.adapters.pgi.adapter import PgiTcpOperationOutcomeUnknownError
 from gripper_ai_controller.configuration import GripperControlSettings
 from gripper_ai_controller.domain.models import GripperAction, GripperCommand, GripperStatus
 from gripper_ai_controller.domain.ports import OperatorControllableGripper
@@ -77,6 +78,12 @@ class GripperUnavailableError(GripperControlError):
     code = "gripper_unavailable"
 
 
+class GripperOperationOutcomeUnknownError(GripperUnavailableError):
+    """Report a physical operation that may have reached the device without an acknowledgement."""
+
+    code = "gripper_operation_outcome_unknown"
+
+
 @dataclass(frozen=True)
 class ManualGripperStatus:
     """Browser-safe state for the one explicitly configured manual gripper."""
@@ -89,7 +96,7 @@ class ManualGripperStatus:
     initializing: bool
     moving: bool
     gripping: bool
-    position: int
+    target_position: int
     position_is_feedback: bool
     grip_state: str
     supports_speed: bool
@@ -325,6 +332,13 @@ class ManualGripperControlService:
                             + INITIALIZATION_TIMEOUT_GRACE_SECONDS
                         ),
                     )
+                except PgiTcpOperationOutcomeUnknownError as error:
+                    self._clear_arm()
+                    self._last_error = (
+                        "The gripper initialization outcome is unknown. Reconnect and inspect the "
+                        "gripper before issuing another command."
+                    )
+                    raise GripperOperationOutcomeUnknownError(self._last_error) from error
                 except asyncio.TimeoutError as error:
                     self._clear_arm()
                     self._last_error = "Gripper initialization timed out."
@@ -390,6 +404,13 @@ class ManualGripperControlService:
                     raise GripperControlConflictError(decision.reason)
                 try:
                     status = await self.gripper.execute(command)
+                except PgiTcpOperationOutcomeUnknownError as error:
+                    self._clear_arm()
+                    self._last_error = (
+                        "The gripper command outcome is unknown. Reconnect and inspect the gripper "
+                        "before issuing another command."
+                    )
+                    raise GripperOperationOutcomeUnknownError(self._last_error) from error
                 except Exception as error:
                     self._clear_arm()
                     self._last_error = (
@@ -524,7 +545,7 @@ class ManualGripperControlService:
             initializing=status.initializing,
             moving=status.moving,
             gripping=status.gripping,
-            position=status.position,
+            target_position=status.position,
             position_is_feedback=status.position_is_feedback,
             grip_state=status.grip_state,
             supports_speed=self.gripper.supports_speed,

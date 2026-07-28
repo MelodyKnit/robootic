@@ -3,7 +3,7 @@
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 from gripper_ai_controller.bootstrap.runtime_builder import (
     GRIPPER_ADAPTERS,
@@ -27,7 +27,7 @@ from gripper_ai_controller.configuration import (
     WebPreviewSettings,
     validate_camera_parameter_overrides,
 )
-from gripper_ai_controller.domain.models import CameraParameterValue
+from gripper_ai_controller.domain.models import CameraParameterValue, RuntimeMode
 from gripper_ai_controller.domain.ports import OperatorControllableGripper, VisionAdapter
 
 
@@ -42,6 +42,8 @@ class VisionPreviewConfig:
     config_file: Optional[str] = None
     vision_name: Optional[str] = None
     vision_adapter_settings: Dict[str, Any] = field(default_factory=dict)
+    runtime_mode: RuntimeMode = RuntimeMode.PRODUCTION
+    preview_plugin_names: Tuple[str, ...] = ("visual-pose-analysis",)
     pose_settings: PoseTrackingSettings = field(default_factory=PoseTrackingSettings)
     vision_analysis_settings: VisionAnalysisSettings = field(default_factory=VisionAnalysisSettings)
     gripper: Optional[OperatorControllableGripper] = None
@@ -70,13 +72,15 @@ def load_vision_preview_config(config_file: str) -> VisionPreviewConfig:
     payload = load_json_config(config_file)
     camera = required_mapping(payload, "camera")
     components = required_mapping(payload, "components")
+    runtime_mode = _optional_runtime_mode(payload)
     camera_id = required_string(camera, "camera_id")
     vision_name = required_string(components, "vision")
     vision_adapter_settings = optional_mapping(components, "vision_adapter_settings")
+    preview_plugin_names = _build_preview_plugin_names(optional_mapping(components, "plugins"))
     camera_parameter_overrides = validate_camera_parameter_overrides(
         payload.get("camera_parameters", {})
     )
-    web_settings = _build_web_settings(optional_mapping(payload, "web"))
+    web_settings = _build_web_settings(optional_mapping(payload, "web"), runtime_mode)
     gripper = None
     gripper_control_settings = None
     if "gripper_control" in payload:
@@ -108,6 +112,8 @@ def load_vision_preview_config(config_file: str) -> VisionPreviewConfig:
         config_file=config_file,
         vision_name=vision_name,
         vision_adapter_settings=dict(vision_adapter_settings),
+        runtime_mode=runtime_mode,
+        preview_plugin_names=preview_plugin_names,
         pose_settings=build_pose_tracking_settings(optional_mapping(payload, "pose")),
         vision_analysis_settings=_build_vision_analysis_settings(
             optional_mapping(payload, "vision_analysis")
@@ -131,7 +137,7 @@ def load_vision_evaluation_config(config_file: str) -> VisionEvaluationConfig:
     )
 
 
-def _build_web_settings(settings):
+def _build_web_settings(settings, runtime_mode=RuntimeMode.PRODUCTION):
     """Validate bounded preview parameters before the HTTP server starts."""
 
     allowed = {
@@ -144,6 +150,7 @@ def _build_web_settings(settings):
         "camera_controls_enabled",
         "gripper_controls_enabled",
         "jaka_controls_enabled",
+        "plugin_reload_enabled",
     }
     unknown = set(settings).difference(allowed)
     if unknown:
@@ -157,10 +164,15 @@ def _build_web_settings(settings):
     camera_controls_enabled = _boolean_setting(settings, "camera_controls_enabled", False)
     gripper_controls_enabled = _boolean_setting(settings, "gripper_controls_enabled", False)
     jaka_controls_enabled = _boolean_setting(settings, "jaka_controls_enabled", False)
+    plugin_reload_enabled = _boolean_setting(settings, "plugin_reload_enabled", False)
     if (gripper_controls_enabled or jaka_controls_enabled) and bind_host != "127.0.0.1":
         raise ValueError(
             "web.bind_host must be 127.0.0.1 when browser gripper or JAKA controls are enabled."
         )
+    if plugin_reload_enabled and runtime_mode != RuntimeMode.DEVELOPMENT:
+        raise ValueError("web.plugin_reload_enabled requires runtime_mode to be development.")
+    if plugin_reload_enabled and bind_host != "127.0.0.1":
+        raise ValueError("web.bind_host must be 127.0.0.1 when plugin reload is enabled.")
     return WebPreviewSettings(
         bind_host=bind_host,
         port=port,
@@ -171,6 +183,7 @@ def _build_web_settings(settings):
         camera_controls_enabled=camera_controls_enabled,
         gripper_controls_enabled=gripper_controls_enabled,
         jaka_controls_enabled=jaka_controls_enabled,
+        plugin_reload_enabled=plugin_reload_enabled,
     )
 
 
@@ -390,7 +403,9 @@ def _build_vision_analysis_settings(settings):
     )
 
 
-def validate_web_settings(settings: WebPreviewSettings) -> WebPreviewSettings:
+def validate_web_settings(
+    settings: WebPreviewSettings, runtime_mode: RuntimeMode = RuntimeMode.PRODUCTION
+) -> WebPreviewSettings:
     """Revalidate settings after explicit CLI overrides without accepting unsafe paths."""
 
     return _build_web_settings(
@@ -404,8 +419,37 @@ def validate_web_settings(settings: WebPreviewSettings) -> WebPreviewSettings:
             "camera_controls_enabled": settings.camera_controls_enabled,
             "gripper_controls_enabled": settings.gripper_controls_enabled,
             "jaka_controls_enabled": settings.jaka_controls_enabled,
-        }
+            "plugin_reload_enabled": settings.plugin_reload_enabled,
+        },
+        runtime_mode,
     )
+
+
+def _optional_runtime_mode(payload: Dict[str, Any]) -> RuntimeMode:
+    """Read an optional preview runtime mode without breaking existing local configs."""
+
+    value = payload.get("runtime_mode", RuntimeMode.PRODUCTION.value)
+    if not isinstance(value, str):
+        raise ValueError("runtime_mode must be a string when present.")
+    try:
+        return RuntimeMode(value)
+    except ValueError as error:
+        raise ValueError("runtime_mode must be development or production.") from error
+
+
+def _build_preview_plugin_names(plugins: Dict[str, Any]) -> Tuple[str, ...]:
+    """Validate configured preview plugins while preserving the legacy visual pipeline."""
+
+    value = plugins.get("preview")
+    if value is None:
+        return ("visual-pose-analysis",)
+    if not isinstance(value, list) or not value:
+        raise ValueError("components.plugins.preview must be a non-empty JSON array.")
+    if any(not isinstance(name, str) or not name for name in value):
+        raise ValueError("components.plugins.preview entries must be non-empty strings.")
+    if len(set(value)) != len(value):
+        raise ValueError("components.plugins.preview must not contain duplicate plugin names.")
+    return tuple(value)
 
 
 def _required_bounded_integer(settings, key, minimum, maximum, section):

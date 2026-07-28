@@ -1,7 +1,7 @@
 """Typed runtime events and a deterministic asynchronous event bus."""
 
 from dataclasses import dataclass
-from typing import Awaitable, Callable, List
+from typing import Awaitable, Callable, List, Optional
 
 from gripper_ai_controller.domain.models import (
     AdapterExecutionReport,
@@ -29,9 +29,16 @@ class ObjectiveRequested(RuntimeEvent):
 
 @dataclass(frozen=True)
 class FrameCaptured(RuntimeEvent):
-    """Publishes a frame emitted by a vision adapter for perception plugins to observe."""
+    """Publishes a frame emitted by a vision adapter for perception plugins to observe.
+
+    ``on_pose_inference_started`` is an optional preview-only callback. It carries no
+    adapter or command capability: the browser preview uses it only to preserve the
+    already encoded JPEG when a bounded pose worker actually starts inference for
+    this frame. Runtime-produced frame events leave it unset.
+    """
 
     frame: ImageFrame
+    on_pose_inference_started: Optional[Callable[[], Awaitable[None]]] = None
 
 
 @dataclass(frozen=True)

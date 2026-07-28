@@ -1,6 +1,6 @@
 # 相机网页预览后端
 
-本包提供独立的 FastAPI 相机预览、受限相机参数和可选人工夹爪、JAKA 六轴控制服务。默认只启动配置的 `VisionAdapter`，以单一采集循环获取帧、在内存中编码为 JPEG，并通过快照和 MJPEG 接口提供给浏览器。采集、JPEG 编码、CUDA 姿态推理和质量诊断各自使用受限的单工作线程；每条慢路径最多保留一个正在处理项和一个可替换的最新待处理项。
+本包提供独立的 FastAPI 相机预览、受限相机参数和可选人工夹爪、JAKA 六轴控制服务。默认启动配置的 `VisionAdapter` 和网页预览 `PluginHost`，以单一采集循环获取帧、在内存中编码为 JPEG，并通过快照和 MJPEG 接口提供给浏览器。`visual-pose-analysis` Plugin 只消费 JPEG 发布后的帧事件，维护姿态与成像分析快照；采集、JPEG 编码、CUDA 姿态推理和质量诊断各自使用受限的单工作线程，每条慢路径最多保留一个正在处理项和一个可替换的最新待处理项。
 
 服务不会创建 `Runtime`、规划器、镜像目标或视觉运动链路，也不会将帧写入磁盘。默认配置不构造机器人或夹爪适配器；声明 `gripper_control` 或 `jaka_control` 后，才会分别构造其 `target_name` 选中的一个主设备及对应人工控制门面，以提供只读状态。只有本机配置明确开启对应网页控制开关后，人工门面才允许动作；它们不会启动自动规划、视觉跟随或运行时调度。
 
@@ -17,8 +17,11 @@
 - `GET /api/cameras/{camera_id}/pose/frame?captured_at={timestamp}`：返回该姿态结果对应的 JPEG 源图；`captured_at` 为 `/pose` 的浮点采集时间，成功时返回 `image/jpeg`、`Cache-Control: no-store` 和 `X-Camera-Captured-At`。它只读取最多三个已送入推理的内存 JPEG，不触发采集或推理；缓存尚未可用、已被淘汰或姿态未启用时返回 `503`、`pose_frame_unavailable`。
 - `PUT /api/cameras/{camera_id}/pose/target`：请求体为 `{ "target_joint": "right_wrist" }`，更新 COCO 关节选择并原子保存到显式本机配置。
 - `GET /api/cameras/{camera_id}/vision/analysis`：返回已缓存的成像质量、Keypoint R-CNN 已产生的人员框、主人体框、17 个关节可见性和失败原因；不会触发新的采集或推理。
+- `GET /api/plugins`：返回配置的网页预览 Plugin 清单、能力、生命周期状态、最近错误和重载可用性。
+- `GET /api/plugins/{plugin_id}/status`：返回一个已配置网页 Plugin 的详细状态；未知标识返回 `404`。
+- `POST /api/plugins/reload`：请求体为 `{ "plugin_ids": ["visual-pose-analysis"] }`；空列表表示重载全部已配置网页 Plugin。仅本机回环开发服务、且 `web.plugin_reload_enabled` 为真时可用；未授权为 `403`，重载进行中为 `409`，替换失败为 `503`。
 - `GET /api/grippers`：返回零或一个可人工控制夹爪的状态；控制未启用或未配置时列表为空。
-- `GET /api/grippers/{gripper_id}/status`：读取当前连接、初始化、运动、夹持、位置和最近错误。
+- `GET /api/grippers/{gripper_id}/status`：读取当前连接、初始化、运动、夹持、`target_position`、该值是否为实时反馈以及最近错误。
 - `POST /api/grippers/{gripper_id}/reconnect`：只重新连接和读取状态，立即撤销旧控制令牌，不初始化或运动。
 - `POST /api/grippers/{gripper_id}/arm`：请求体为 `{ "work_area_clear": true, "emergency_stop_ready": true }`，确认后返回临时令牌。
 - `DELETE /api/grippers/{gripper_id}/arm`：携带 `X-Gripper-Control-Token` 撤销当前令牌，不发送设备动作。
@@ -35,13 +38,21 @@
 
 参数列表响应包含 `camera_id`、`write_enabled` 和 `parameters`。每个参数带有 `key`、`kind`、`apply_mode`、`value`、可选的数值范围和单位，以及枚举选项。更新响应额外带有 `restarted_acquisition`。未知相机返回 `404`；写入开关未启用时返回 `403`；适配器未提供控制能力时返回 `409`；格式、范围或应用方式错误返回 `422`。设备成功应用参数但无法写回配置时返回 `503`，错误 `code` 为 `camera_parameter_persistence_failed`，含义是设备已生效而配置未保存。所有 JSON 错误均为 `code` 和 `message`。
 
-夹爪接口也使用统一的 `{ "code", "message" }` 错误格式：未启用或未解锁为 `403`，动作或能力状态冲突为 `409`，请求或参数错误为 `422`，TCP 或状态读取故障为 `503`。初始化和命令的成功响应包含 `idempotency_key`、`replayed` 和 `status`；相同幂等键加相同操作只返回原结果，不会重复下发动作。控制令牌只保留在浏览器内存中，60 秒没有成功初始化或动作后失效；断连、重新连接、初始化失败和服务关闭也会撤销它。
+夹爪接口也使用统一的 `{ "code", "message" }` 错误格式：未启用或未解锁为 `403`，动作或能力状态冲突为 `409`，请求或参数错误为 `422`，TCP 或状态读取故障为 `503`。写入已送出但确认响应丢失时，接口以 `503` 和 `gripper_operation_outcome_unknown` 返回；服务会撤销临时令牌，客户端不得以新幂等键自动重发，必须先重新连接并检查设备。初始化和命令的成功响应包含 `idempotency_key`、`replayed` 和 `status`；相同幂等键加相同操作只返回原结果，不会重复下发动作。控制令牌只保留在浏览器内存中，60 秒没有成功初始化或动作后失效；断连、重新连接、初始化失败和服务关闭也会撤销它。
 
 JAKA 接口同样使用 `{ "code", "message" }` 错误格式：控制未启用或令牌缺失、失效时为 `403`；设备状态、能力或幂等键冲突时为 `409`；关节数量、有限值、速度、限位或过期预览错误为 `422`；SDK 登录、遥测或控制器连接故障为 `503`。使能和已确认动作的成功响应都包含 `idempotency_key`、`replayed` 和最新 `status`，重复同一幂等键且操作一致时只返回首次结果，不会重复下发动作。
 
 姿态响应包含 `enabled`、`valid`、`reason`、`target_joint`、可选 `target`、可选 `person`、`inference_latency_ms`、`lost_frames`、可选 `motion`、`draw_skeleton`、`latest_frame_at` 和 `overlay_fresh`。`motion` 只描述连续两个已关联有效帧中锁定关节的归一化图像位移与速度，并在目标丢失、人体关联失败、目标切换、时间戳倒退或采集间隔超限后为 `null`；它不含真实距离、三维速度或控制命令。`valid` 只表示所选目标关节是否满足锁定资格；只要 `person` 存在且其来源帧不晚于最新 JPEG、两者时间差不超过 `pose.overlay_max_frame_lag_seconds`，`overlay_fresh` 就为 `true`，浏览器即可绘制人体框和其余骨架。过期时只隐藏叠加，视频流继续播放。网页主画面始终保持 `GET /stream` 的 MJPEG；`/pose/frame` 是独立诊断接口，不参与主画面切换。`person` 内是归一化坐标及原始像素坐标的 COCO 关节点，不含图像载荷、模型张量或任何可执行控制命令。姿态未启用时 `GET /pose` 仍返回 `200` 和 `enabled: false`，而更新目标返回 `409`；无效关节返回 `422`。详情见 [姿态感知包说明](../pose/README.md)。
 
 成像分析响应包含 `frame`、`person_count`、`persons`、`selected_person`、`joint_visibility` 和 `visible_joint_names`。`frame` 只含尺寸、像素格式、亮度均值、对比度、拉普拉斯方差清晰度和非阻断警告；`persons` 直接复用最近一次 Keypoint R-CNN 推理中通过人体阈值的候选，不会加载第二个人体检测模型。姿态未启用时接口仍返回 `200`，并提供帧质量但 `pose_enabled: false`；未知相机继续返回 `404`。详情见 [视觉分析包说明](../vision/README.md)。
+
+## 网页预览 Plugin 边界
+
+网页预览只从 `components.plugins.preview` 加载已注册的稳定组件标识符，浏览器请求不能提供模块路径或工厂名称。当前受信任注册表只包含 `visual-pose-analysis`；新增 Plugin 必须先在服务端注册固定工厂，不能仅改写配置。Plugin 列表接口返回稳定 ID、名称、版本、能力、`ui_kind`、生命周期状态、最近错误和重载能力；已注册但尚无专用面板的模块只显示状态卡，绝不生成动态设备控制表单。
+
+`visual-pose-analysis` 只处理帧事件并公开只读姿态、人员检测与成像分析结果。它不导入相机 SDK、不持有相机、夹爪或 JAKA 适配器，也不能调用人工控制服务。Plugin 重载会暂停该模块的新帧投递，等待其工作完成后原子替换；若新实例启动失败，旧实例继续运行。整个过程中 JPEG 缓存、MJPEG URL 和相机采集循环保持不变。
+
+重载仅在 `runtime_mode` 为 `development`、`web.bind_host` 严格为 `127.0.0.1` 且 `web.plugin_reload_enabled` 为 `true` 时开放。生产模式必须停止并重启服务以加载 Plugin 更新；任何非回环地址均拒绝网页重载，避免无认证网络服务装载更新。
 
 ## 夹爪控制边界
 

@@ -76,6 +76,7 @@ class WebPreviewSettings:
     camera_controls_enabled: bool = False
     gripper_controls_enabled: bool = False
     jaka_controls_enabled: bool = False
+    plugin_reload_enabled: bool = False
 
 
 @dataclass(frozen=True)

@@ -4,7 +4,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import math
 import time
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Awaitable, Callable, Optional, Tuple
 
 from gripper_ai_controller.configuration import PoseTrackingSettings
 from gripper_ai_controller.domain.models import BoundingBox2D, ImageFrame
@@ -62,7 +62,7 @@ class PoseTrackingService:
             0,
         )
         self._inference_task = None  # type: Optional[asyncio.Task]
-        self._pending_frame = None  # type: Optional[ImageFrame]
+        self._pending_frame = None  # type: Optional[Tuple[ImageFrame, Optional[Callable[[], Awaitable[None]]]]]
         self._inference_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="pose-inference",
@@ -80,8 +80,18 @@ class PoseTrackingService:
         self._previous_motion_captured_at = None  # type: Optional[float]
         self._tracked_bounding_box = None  # type: Optional[BoundingBox2D]
 
-    async def submit_frame(self, frame: ImageFrame) -> bool:
-        """Schedule one bounded inference and report whether this frame entered the model path."""
+    async def submit_frame(
+        self,
+        frame: ImageFrame,
+        on_inference_started: Optional[Callable[[], Awaitable[None]]] = None,
+    ) -> bool:
+        """Schedule one bounded inference and report whether this frame entered the model path.
+
+        The optional callback is invoked only when this frame becomes the active
+        model input. A preview uses that narrow point to retain the matching JPEG;
+        frames superseded in the latest-only pending slot never consume pose-frame
+        cache capacity.
+        """
 
         if self._stopped or not self.settings.enabled or frame.camera_id != self.camera_id:
             return False
@@ -89,10 +99,12 @@ class PoseTrackingService:
             if self._inference_task is not None and not self._inference_task.done():
                 # Preserve only the newest source image while GPU inference is active.
                 # This bounds memory and prevents a completed result from chasing a FIFO.
-                self._pending_frame = frame
+                self._pending_frame = (frame, on_inference_started)
                 return True
             self._pending_frame = None
-            self._inference_task = asyncio.create_task(self._run_inference_pipeline(frame))
+            self._inference_task = asyncio.create_task(
+                self._run_inference_pipeline(frame, on_inference_started)
+            )
             return True
 
     async def snapshot(self) -> PoseTrackingSnapshot:
@@ -157,7 +169,11 @@ class PoseTrackingService:
                 pass
         self._inference_executor.shutdown(wait=True)
 
-    async def _run_inference_pipeline(self, frame: ImageFrame) -> None:
+    async def _run_inference_pipeline(
+        self,
+        frame: ImageFrame,
+        on_inference_started: Optional[Callable[[], Awaitable[None]]],
+    ) -> None:
         """Run one inference at a time and replace any queued source with the latest frame."""
 
         current_frame = frame
@@ -177,6 +193,7 @@ class PoseTrackingService:
                     self._inference_task = None
                     return
                 self._last_inference_started_at = self._monotonic_clock()
+            await self._notify_inference_started(on_inference_started)
             await self._infer_frame(current_frame)
             async with self._lock_for_current_loop():
                 if self._stopped:
@@ -188,7 +205,22 @@ class PoseTrackingService:
                 if next_frame is None:
                     self._inference_task = None
                     return
-                current_frame = next_frame
+                current_frame, on_inference_started = next_frame
+
+    @staticmethod
+    async def _notify_inference_started(
+        callback: Optional[Callable[[], Awaitable[None]]]
+    ) -> None:
+        """Run a cache-only preview callback without allowing it to block inference."""
+
+        if callback is None:
+            return
+        try:
+            await callback()
+        except Exception:
+            # JPEG diagnostic retention is optional. A cache failure must not prevent
+            # the model from producing a current pose snapshot.
+            pass
 
     async def _infer_frame(self, frame: ImageFrame) -> None:
         """Run the synchronous estimator outside the event loop then atomically publish its result."""

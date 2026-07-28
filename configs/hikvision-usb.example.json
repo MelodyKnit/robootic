@@ -21,6 +21,9 @@
       ],
       "observers": [
         "audit"
+      ],
+      "preview": [
+        "visual-pose-analysis"
       ]
     }
   },
@@ -46,6 +49,7 @@
     "stream_fps": 10,
     "jpeg_quality": 80,
     "capture_retry_seconds": 1.0,
-    "camera_controls_enabled": false
+    "camera_controls_enabled": false,
+    "plugin_reload_enabled": false
   }
 }

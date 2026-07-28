@@ -5,7 +5,12 @@
     "mounting": "fixed"
   },
   "components": {
-    "vision": "simulated-camera"
+    "vision": "simulated-camera",
+    "plugins": {
+      "preview": [
+        "visual-pose-analysis"
+      ]
+    }
   },
   "web": {
     "bind_host": "0.0.0.0",
@@ -14,7 +19,8 @@
     "stream_fps": 10,
     "jpeg_quality": 80,
     "capture_retry_seconds": 1.0,
-    "camera_controls_enabled": false
+    "camera_controls_enabled": false,
+    "plugin_reload_enabled": false
   },
   "pose": {
     "enabled": false,

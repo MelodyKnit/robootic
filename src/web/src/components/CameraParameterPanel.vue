@@ -94,7 +94,7 @@ function controlDisabled(parameter: CameraParameter): boolean {
 </script>
 
 <template>
-  <section v-if="cameraId !== null" class="p-5 flex flex-col h-full bg-slate-950 text-slate-300 select-none" aria-label="相机参数">
+  <section v-if="cameraId !== null" class="p-5 flex flex-col bg-slate-950 text-slate-300 select-none" aria-label="相机参数">
     <div class="mb-4 shrink-0 flex items-center justify-between">
       <div>
         <h2 class="text-xs font-bold text-slate-500 uppercase tracking-widest">相机参数</h2>

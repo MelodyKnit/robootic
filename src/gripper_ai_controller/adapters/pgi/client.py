@@ -25,6 +25,10 @@ class PgiTcpTransportError(PgiTcpClientError):
     """Report a connection, send, receive, or timeout failure."""
 
 
+class PgiTcpWriteOutcomeUnknownError(PgiTcpTransportError):
+    """Report a write whose device-side result cannot be confirmed safely."""
+
+
 class PgiTcpProtocolError(PgiTcpClientError):
     """Report a malformed or mismatched PGI gateway response."""
 
@@ -199,9 +203,9 @@ class PgiTcpClient:
                 except OSError as error:
                     self._close_locked()
                     if operation == WRITE_OPERATION:
-                        raise PgiTcpTransportError(
-                            "PGI write delivery is uncertain and was not retried. "
-                            "Inspect the gripper before issuing another command."
+                        raise PgiTcpWriteOutcomeUnknownError(
+                            "PGI write outcome is unknown and was not retried. "
+                            "Reconnect and inspect the gripper before issuing another command."
                         ) from error
                     last_error = error
                     if attempt < self.retry_count:
@@ -215,9 +219,9 @@ class PgiTcpClient:
                 except (OSError, PgiTcpClientError) as error:
                     self._close_locked()
                     if operation == WRITE_OPERATION:
-                        raise PgiTcpTransportError(
-                            "PGI write delivery is uncertain and was not retried. "
-                            "Inspect the gripper before issuing another command."
+                        raise PgiTcpWriteOutcomeUnknownError(
+                            "PGI write outcome is unknown and was not retried. "
+                            "Reconnect and inspect the gripper before issuing another command."
                         ) from error
                     last_error = error
                     if attempt < self.retry_count:

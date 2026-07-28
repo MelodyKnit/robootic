@@ -120,7 +120,11 @@ watch(
       return
     }
     draftedForGripperId = status.id
-    targetPosition.value = clampInteger(status.position, status.minimumPosition, status.maximumPosition)
+    targetPosition.value = clampInteger(
+      status.targetPosition,
+      status.minimumPosition,
+      status.maximumPosition,
+    )
     forcePercent.value = status.forceMin
     speedPercent.value = status.speedMin
   },
@@ -255,7 +259,7 @@ function clampInteger(value: number, minimum: number, maximum: number): number {
         </div>
         <div>
           <dt class="text-[10px] font-bold text-slate-600">{{ positionLabel }}</dt>
-          <dd class="mt-1 font-mono font-bold text-slate-200">{{ gripper.position }}</dd>
+          <dd class="mt-1 font-mono font-bold text-slate-200">{{ gripper.targetPosition }}</dd>
           <p v-if="!gripper.positionIsFeedback" class="mt-1 text-[9px] text-amber-400">实时位置反馈未验证</p>
         </div>
         <div>

@@ -9,6 +9,7 @@ from typing import Optional
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from gripper_ai_controller.adapters.pgi.adapter import PgiTcpOperationOutcomeUnknownError
 from gripper_ai_controller.adapters.simulation import SimulatedCameraAdapter
 from gripper_ai_controller.bootstrap.preview_builder import VisionPreviewConfig
 from gripper_ai_controller.configuration import (
@@ -25,6 +26,7 @@ from gripper_ai_controller.web.gripper_service import (
     GripperControlConflictError,
     GripperControlsDisabledError,
     GripperNotArmedError,
+    GripperOperationOutcomeUnknownError,
     ManualGripperControlService,
 )
 from gripper_ai_controller.web.app import create_web_app
@@ -64,11 +66,13 @@ class FakeOperatorGripper:
         supports_speed: bool = True,
         supports_stop: bool = True,
         startup_error: Optional[BaseException] = None,
+        execute_error: Optional[BaseException] = None,
     ) -> None:
         self._control_mode = mode
         self._supports_speed = supports_speed
         self._supports_stop = supports_stop
         self.startup_error = startup_error
+        self.execute_error = execute_error
         self.started = False
         self.startup_calls = 0
         self.shutdown_calls = 0
@@ -166,6 +170,8 @@ class FakeOperatorGripper:
 
         self.execute_calls += 1
         self.last_command = command
+        if self.execute_error is not None:
+            raise self.execute_error
         if self.execute_entered is not None:
             self.execute_entered.set()
         if self.execute_release is not None:
@@ -301,7 +307,7 @@ class ManualGripperControlServiceTests(unittest.TestCase):
             )
             self.assertFalse(first.replayed)
             self.assertTrue(replay.replayed)
-            self.assertEqual(420, replay.status.position)
+            self.assertEqual(420, replay.status.target_position)
             self.assertEqual(1, adapter.execute_calls)
             self.assertEqual(420, adapter.last_command.target_position)
             await service.shutdown()
@@ -458,6 +464,42 @@ class ManualGripperControlServiceTests(unittest.TestCase):
 
         run_async(scenario())
 
+    def test_unknown_physical_command_outcome_revokes_the_control_token(self):
+        async def scenario():
+            adapter = FakeOperatorGripper(
+                mode="physical",
+                supports_speed=False,
+                supports_stop=False,
+                execute_error=PgiTcpOperationOutcomeUnknownError("acknowledgement lost"),
+            )
+            adapter.status_value = replace(adapter.status_value, initialized=True)
+            service = make_service(adapter)
+            await service.startup()
+            session = await service.arm(True, True)
+
+            with self.assertRaisesRegex(
+                GripperOperationOutcomeUnknownError,
+                "outcome is unknown",
+            ):
+                await service.execute_command(
+                    session.token,
+                    "uncertain-command",
+                    "move_to_position",
+                    target_position=300,
+                )
+
+            self.assertEqual(1, adapter.execute_calls)
+            with self.assertRaises(GripperNotArmedError):
+                await service.execute_command(
+                    session.token,
+                    "second-command",
+                    "move_to_position",
+                    target_position=300,
+                )
+            await service.shutdown()
+
+        run_async(scenario())
+
 
 class ManualGripperHttpTests(unittest.TestCase):
     """Exercise the documented resource and error contracts through FastAPI."""
@@ -469,7 +511,10 @@ class ManualGripperHttpTests(unittest.TestCase):
         with TestClient(application) as client:
             listed = client.get("/api/grippers")
             self.assertEqual(200, listed.status_code)
-            self.assertEqual("primary-gripper", listed.json()["grippers"][0]["gripper_id"])
+            listed_status = listed.json()["grippers"][0]
+            self.assertEqual("primary-gripper", listed_status["gripper_id"])
+            self.assertEqual(500, listed_status["target_position"])
+            self.assertNotIn("position", listed_status)
             self.assertEqual(404, client.get("/api/grippers/missing/status").status_code)
 
             rejected_arm = client.post(
@@ -574,6 +619,43 @@ class ManualGripperHttpTests(unittest.TestCase):
             )
             self.assertEqual(403, stopped.status_code)
             self.assertEqual("gripper_not_armed", stopped.json()["code"])
+
+    def test_unknown_physical_command_outcome_returns_503_and_revokes_the_token(self):
+        adapter = FakeOperatorGripper(
+            mode="physical",
+            supports_speed=False,
+            supports_stop=False,
+            execute_error=PgiTcpOperationOutcomeUnknownError("acknowledgement lost"),
+        )
+        adapter.status_value = replace(adapter.status_value, initialized=True)
+        application = create_test_app(make_service(adapter))
+
+        with TestClient(application) as client:
+            armed = client.post(
+                "/api/grippers/primary-gripper/arm",
+                json={"work_area_clear": True, "emergency_stop_ready": True},
+            ).json()
+            headers = {
+                "X-Gripper-Control-Token": armed["token"],
+                "Idempotency-Key": "unknown-outcome-command",
+            }
+            outcome = client.post(
+                "/api/grippers/primary-gripper/commands",
+                headers=headers,
+                json={"action": "move_to_position", "target_position": 300},
+            )
+
+            self.assertEqual(503, outcome.status_code)
+            self.assertEqual("gripper_operation_outcome_unknown", outcome.json()["code"])
+            self.assertEqual(1, adapter.execute_calls)
+
+            retried = client.post(
+                "/api/grippers/primary-gripper/commands",
+                headers={"Idempotency-Key": "new-command"},
+                json={"action": "move_to_position", "target_position": 300},
+            )
+            self.assertEqual(403, retried.status_code)
+            self.assertEqual("gripper_not_armed", retried.json()["code"])
 
     def test_disabled_http_surface_exposes_read_only_status_without_authorization(self):
         adapter = FakeOperatorGripper()

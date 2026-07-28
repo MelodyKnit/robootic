@@ -10,7 +10,8 @@
     "plugins": {
       "perception": "replace-with-perception-plugin",
       "planners": ["replace-with-planner-plugin"],
-      "observers": ["audit"]
+      "observers": ["audit"],
+      "preview": ["visual-pose-analysis"]
     }
   },
   "targets": [

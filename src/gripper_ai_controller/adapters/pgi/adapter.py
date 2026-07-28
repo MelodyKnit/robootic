@@ -8,7 +8,11 @@ import time
 from typing import Callable, Optional
 
 from gripper_ai_controller.adapters.base import BaseAdapter
-from gripper_ai_controller.adapters.pgi.client import PgiTcpClient, PgiTcpClientError
+from gripper_ai_controller.adapters.pgi.client import (
+    PgiTcpClient,
+    PgiTcpClientError,
+    PgiTcpWriteOutcomeUnknownError,
+)
 from gripper_ai_controller.domain.models import (
     ComponentManifest,
     GripperAction,
@@ -20,6 +24,10 @@ from gripper_ai_controller.domain.ports import OperatorControllableGripper
 
 class PgiTcpAdapterError(RuntimeError):
     """Report a normalized PGI adapter lifecycle, state, or command failure."""
+
+
+class PgiTcpOperationOutcomeUnknownError(PgiTcpAdapterError):
+    """Report a physical PGI operation whose acknowledgement was not confirmed."""
 
 
 PgiClientFactory = Callable[[], PgiTcpClient]
@@ -220,6 +228,12 @@ class PgiTcpGripperAdapter(BaseAdapter, OperatorControllableGripper):
                     if time.monotonic() >= deadline:
                         raise PgiTcpAdapterError("PGI initialization did not finish before its timeout.")
                     await asyncio.sleep(self._initialization_poll_seconds)
+            except PgiTcpWriteOutcomeUnknownError as error:
+                self._record_error(error)
+                raise PgiTcpOperationOutcomeUnknownError(
+                    "PGI initialization outcome is unknown. Reconnect and inspect the gripper "
+                    "before issuing another command."
+                ) from error
             except (PgiTcpClientError, PgiTcpAdapterError) as error:
                 self._record_error(error)
                 if isinstance(error, PgiTcpAdapterError):
@@ -256,6 +270,12 @@ class PgiTcpGripperAdapter(BaseAdapter, OperatorControllableGripper):
                     await self._call_client("set_target_force", command.force_percent)
                 await self._call_client("set_target_position", command.target_position)
                 return await self._read_status_unlocked()
+            except PgiTcpWriteOutcomeUnknownError as error:
+                self._record_error(error)
+                raise PgiTcpOperationOutcomeUnknownError(
+                    "PGI command outcome is unknown. Reconnect and inspect the gripper "
+                    "before issuing another command."
+                ) from error
             except (PgiTcpClientError, PgiTcpAdapterError, ValueError) as error:
                 self._record_error(error)
                 if isinstance(error, PgiTcpAdapterError):

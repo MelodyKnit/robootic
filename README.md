@@ -71,6 +71,10 @@ poetry run gripper-ai-controller pose-download-weights --weights-file localstore
 
 ### 3.2 模拟与干跑 (Dry Run / Simulation)
 ```powershell
+# 0. 快捷运行脚本（必须从项目根目录执行；网页服务必须提供显式配置文件）
+.\scripts\run.bat web --config-file configs/development.json
+.\scripts\run.bat web --config-file configs/development.json --reload
+
 # 1. 运行系统主目标指令（默认使用 configs/development.json 安全模拟器）
 poetry run python -m gripper_ai_controller run --config-file configs/development.json --objective "Pick the detected workpiece"
 
@@ -83,14 +87,14 @@ poetry run gripper-ai-controller image-centering-simulate --config-file configs/
 
 ### 3.3 离线评估与测试自检
 ```powershell
-# 1. 对本地测试集（Fixture）进行姿态推理质量的综合离线评价
+# 1. 运行全单元与集成测试套件 (快捷批处理脚本，支持指定测试用例参数)
+.\scripts\test.bat
+
+# 2. 对本地测试集（Fixture）进行姿态推理质量的综合离线评价
 poetry run gripper-ai-controller vision-evaluate --config-file configs/vision-evaluation.example.json --report-file temp/gripper-ai-controller/vision-evaluation/report.json --save-overlays
 
-# 2. 热重载开发模块测试（动态重新加载插件等）
+# 3. 热重载开发模块测试（动态重新加载插件等）
 poetry run python -m gripper_ai_controller reload --config-file configs/development.json --module gripper_ai_controller.plugins.audit
-
-# 3. 运行全单元与集成测试套件
-poetry run python -m unittest discover -s tests -v
 
 # 4. 提交代码前的绝对路径检查自律脚本
 python scripts/check_submission_paths.py
@@ -139,6 +143,13 @@ poetry run gripper-ai-controller web --config-file localstore/gripper-web-contro
 * **双重验证保护**：在对机械臂关节点动发送前，需首先生成带有 `preview_id` 的服务端预览帧，随后再次确认现场安全方可触发实体阻隔运动。
 * 网页手动控制绝对不具备对机械臂的 `power_on()`（开机上电能力）。测试前务必由专家完成工具负载及安装姿态的手控校验。
 * 详情说明参见 [JAKA 适配器说明](src/gripper_ai_controller/adapters/jaka/README.md) 与 [网页服务说明](src/gripper_ai_controller/web/README.md)。
+
+### 4.4 Plugin/Adapter 工作台
+桌面宽屏页面分为三栏：左侧显示后端已配置的功能 Plugin，中央始终保持唯一的 MJPEG 实时画面与新鲜骨架叠加，右侧同时展开相机、夹爪和 JAKA 适配器面板。Plugin 状态、错误和能力由 `GET /api/plugins` 动态提供；当前受信任注册表仅内置 `visual-pose-analysis`，新增模块必须先在服务端注册固定工厂，网页不会根据未知或未注册 Plugin 自动生成设备控制表单。
+
+`visual-pose-analysis` 只消费 `FrameCaptured` 图像事件，用于人体姿态、人员范围和成像质量分析。它不持有相机 SDK、夹爪客户端、JAKA 客户端或任何指令权限，因此刷新、展开或重载 Plugin 都不会初始化、使能或驱动设备，也不会重建中央视频流。
+
+开发重载必须同时满足 `runtime_mode: "development"`、`web.bind_host: "127.0.0.1"` 和 `web.plugin_reload_enabled: true`。默认模板关闭该开关；生产服务必须完整重启后才会加载 Plugin 更新。详细接口与配置约束见[网页服务说明](src/gripper_ai_controller/web/README.md)和[配置说明](configs/README.md)。
 
 ---
 

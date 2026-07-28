@@ -8,23 +8,31 @@ from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictStr
 
 from gripper_ai_controller.bootstrap.preview_builder import VisionPreviewConfig
 from gripper_ai_controller.configuration import SafetyLimits
-from gripper_ai_controller.domain.models import CameraParameter, CameraParameterApplyMode
+from gripper_ai_controller.core.plugin_host import (
+    PluginFactoryDescriptor,
+    PluginHost,
+    PluginHostError,
+    PluginReloadFailedError,
+    PluginReloadInProgressError,
+    PluginReloadNotAllowedError,
+    PluginStatus,
+    UnknownPluginError,
+)
+from gripper_ai_controller.domain.models import CameraParameter, CameraParameterApplyMode, RuntimeMode
 from gripper_ai_controller.domain.ports import CameraParameterError
 from gripper_ai_controller.pose.config_store import PoseTargetConfigStore
-from gripper_ai_controller.pose.estimator import TorchvisionKeypointRcnnEstimator
 from gripper_ai_controller.pose.gpu import inspect_cuda_gpu
 from gripper_ai_controller.pose.models import (
     HumanPose2D,
     PoseJoint2D,
     PoseMotion2D,
 )
-from gripper_ai_controller.pose.tracker import PoseTargetError, PoseTrackingService
+from gripper_ai_controller.pose.tracker import PoseTargetError
 from gripper_ai_controller.services.safety import SafetyPolicy
-from gripper_ai_controller.vision.analysis import VisionAnalysisService
 from gripper_ai_controller.vision.models import VisionAnalysisSnapshot
 from gripper_ai_controller.web.config_store import CameraParameterConfigStore
 from gripper_ai_controller.web.gripper_api import install_gripper_routes
@@ -41,6 +49,14 @@ from gripper_ai_controller.web.service import (
     PoseTargetPersistenceError,
     PoseTrackingCapabilityError,
 )
+
+
+_PREVIEW_PLUGIN_FACTORIES = {
+    "visual-pose-analysis": (
+        "gripper_ai_controller.plugins.visual_pose_analysis",
+        "build_visual_pose_analysis_plugin",
+    ),
+}
 
 
 class ApiErrorResponse(BaseModel):
@@ -231,6 +247,31 @@ class VisionAnalysisResponse(BaseModel):
     visible_joint_names: List[str]
 
 
+class PluginStatusResponse(BaseModel):
+    """Browser-safe lifecycle metadata for one configured preview plugin."""
+
+    plugin_id: str
+    name: str
+    version: str
+    capabilities: List[str]
+    ui_kind: str
+    state: str
+    error: Optional[str]
+    reloadable: bool
+
+
+class PluginListResponse(BaseModel):
+    """Stable resource collection used by the dynamic browser plugin workspace."""
+
+    plugins: List[PluginStatusResponse]
+
+
+class PluginReloadRequest(BaseModel):
+    """Select trusted configured plugin IDs; an empty list requests all configured plugins."""
+
+    plugin_ids: List[StrictStr] = Field(default_factory=list)
+
+
 def create_web_app(
     preview_config: VisionPreviewConfig,
     frontend_dist_dir: Optional[str] = None,
@@ -240,12 +281,15 @@ def create_web_app(
 ) -> FastAPI:
     """Create one FastAPI app for preview plus optionally gated manual device control."""
 
+    if preview_config.settings.plugin_reload_enabled and preview_config.runtime_mode != RuntimeMode.DEVELOPMENT:
+        raise ValueError("Browser plugin reload requires a development preview configuration.")
     if (
         preview_config.settings.gripper_controls_enabled
         or preview_config.settings.jaka_controls_enabled
+        or preview_config.settings.plugin_reload_enabled
     ) and preview_config.settings.bind_host != "127.0.0.1":
         raise ValueError(
-            "Browser gripper or JAKA controls require a 127.0.0.1 preview configuration."
+            "Browser gripper, JAKA, or plugin reload controls require a 127.0.0.1 preview configuration."
         )
     if preview_config.pose_settings.enabled:
         preflight = inspect_cuda_gpu()
@@ -264,21 +308,8 @@ def create_web_app(
                 preview_config.vision_name,
                 preview_config.vision_adapter_settings,
             )
-        pose_tracking_service = None
         pose_target_store = None
         if preview_config.pose_settings.enabled:
-            estimator = TorchvisionKeypointRcnnEstimator(
-                preview_config.pose_settings.weights_path,
-                preview_config.pose_settings.device,
-                preview_config.pose_settings.inference_max_side,
-                preview_config.pose_settings.torch_cpu_threads,
-                preview_config.pose_settings.torch_interop_threads,
-            )
-            pose_tracking_service = PoseTrackingService(
-                preview_config.camera_id,
-                preview_config.pose_settings,
-                estimator,
-            )
             if preview_config.config_file is not None and preview_config.vision_name is not None:
                 pose_target_store = PoseTargetConfigStore(
                     preview_config.config_file,
@@ -286,21 +317,15 @@ def create_web_app(
                     preview_config.vision_name,
                     preview_config.vision_adapter_settings,
                 )
-        vision_analysis_service = VisionAnalysisService(
-            preview_config.camera_id,
-            preview_config.vision_analysis_settings,
-            preview_config.pose_settings,
-            pose_tracking_service,
-        )
+        plugin_host = _build_preview_plugin_host(preview_config)
         service = CameraPreviewService(
-            preview_config.camera_id,
-            preview_config.vision,
-            preview_config.settings,
-            preview_config.camera_parameter_overrides,
-            parameter_store,
-            pose_tracking_service,
-            pose_target_store,
-            vision_analysis_service,
+            camera_id=preview_config.camera_id,
+            vision=preview_config.vision,
+            settings=preview_config.settings,
+            camera_parameter_overrides=preview_config.camera_parameter_overrides,
+            parameter_store=parameter_store,
+            pose_target_store=pose_target_store,
+            plugin_host=plugin_host,
         )
     else:
         service = preview_service
@@ -366,6 +391,7 @@ def create_web_app(
         lifespan=lifespan,
     )
     application.state.camera_preview_service = service
+    application.state.preview_plugin_host = service.plugin_host
     application.state.manual_gripper_control_service = gripper_control_service
     application.state.manual_jaka_control_service = jaka_control_service
 
@@ -381,6 +407,70 @@ def create_web_app(
         """Return the configured camera list without starting any additional capture task."""
 
         return {"cameras": [_status_response(await service.hub.status())]}
+
+    @application.get("/api/plugins", response_model=PluginListResponse)
+    async def list_plugins() -> PluginListResponse:
+        """Return configured passive preview plugins without exposing import locations."""
+
+        host = service.plugin_host
+        if host is None:
+            return {"plugins": []}
+        return {"plugins": [_plugin_status_response(status) for status in await host.statuses()]}
+
+    @application.get("/api/plugins/{plugin_id}/status", response_model=PluginStatusResponse)
+    async def plugin_status(plugin_id: str):
+        """Return one configured plugin lifecycle status or a stable not-found response."""
+
+        host = service.plugin_host
+        if host is None:
+            return _error_response(404, "plugin_not_found", "The requested plugin is not configured for preview.")
+        try:
+            return _plugin_status_response(await host.status(plugin_id))
+        except UnknownPluginError:
+            return _error_response(404, "plugin_not_found", "The requested plugin is not configured for preview.")
+
+    @application.post("/api/plugins/reload", response_model=PluginListResponse)
+    async def reload_plugins(request: PluginReloadRequest):
+        """Reload configured passive plugins only when the local development policy permits it."""
+
+        host = service.plugin_host
+        if host is None:
+            return _error_response(
+                403,
+                "plugin_reload_disabled",
+                "Plugin reload is disabled by the current preview configuration.",
+            )
+        try:
+            statuses = await service.reload_plugins(request.plugin_ids)
+        except PluginReloadNotAllowedError:
+            return _error_response(
+                403,
+                "plugin_reload_disabled",
+                "Plugin reload is disabled by the current preview configuration.",
+            )
+        except UnknownPluginError:
+            return _error_response(404, "plugin_not_found", "The requested plugin is not configured for preview.")
+        except PluginReloadInProgressError:
+            return _error_response(
+                409,
+                "plugin_reload_in_progress",
+                "The requested plugin reload is already in progress.",
+            )
+        except ValueError as error:
+            return _error_response(422, "invalid_plugin_reload_request", str(error))
+        except PluginReloadFailedError:
+            return _error_response(
+                503,
+                "plugin_reload_failed",
+                "The plugin replacement failed and the previous active plugin was preserved.",
+            )
+        except PluginHostError:
+            return _error_response(
+                503,
+                "plugin_reload_failed",
+                "The plugin host is temporarily unavailable for reload.",
+            )
+        return {"plugins": [_plugin_status_response(status) for status in statuses]}
 
     @application.get("/api/cameras/{camera_id}/status", response_model=CameraStatusResponse)
     async def camera_status(camera_id: str):
@@ -582,6 +672,67 @@ def create_web_app(
     install_jaka_routes(application, jaka_control_service)
     _mount_frontend_if_present(application, frontend_dist_dir)
     return application
+
+
+def create_web_app_factory() -> FastAPI:
+    """Zero-argument factory used by Uvicorn --reload for auto-reloading development mode."""
+
+    import os
+    from gripper_ai_controller.bootstrap.preview_builder import load_vision_preview_config
+
+    config_file = os.environ.get("GRIPPER_CONFIG_FILE")
+    if not config_file:
+        raise RuntimeError(
+            "GRIPPER_CONFIG_FILE is required for the reload app factory. "
+            "Start the service with an explicit 'web --config-file ... --reload' command."
+        )
+
+    preview_config = load_vision_preview_config(config_file)
+    return create_web_app(preview_config, preview_config.settings.frontend_dist_dir)
+
+
+def _build_preview_plugin_host(preview_config: VisionPreviewConfig) -> PluginHost:
+    """Create configured passive preview plugins from fixed server-side factory entries.
+
+    Browser requests can only name entries already present in this host. The mapping
+    deliberately keeps Python import locations out of JSON and HTTP input while
+    letting project-local plugins evolve independently.
+    """
+
+    descriptors = []
+    for plugin_id in preview_config.preview_plugin_names:
+        factory = _PREVIEW_PLUGIN_FACTORIES.get(plugin_id)
+        if factory is None:
+            raise ValueError("Unsupported preview plugin: {0}".format(plugin_id))
+        module_name, factory_name = factory
+        descriptors.append(
+            PluginFactoryDescriptor(
+                plugin_id=plugin_id,
+                module_name=module_name,
+                factory_name=factory_name,
+                factory_kwargs={
+                    "camera_id": preview_config.camera_id,
+                    "pose_settings": preview_config.pose_settings,
+                    "vision_analysis_settings": preview_config.vision_analysis_settings,
+                },
+            )
+        )
+    return PluginHost(descriptors, reload_enabled=preview_config.settings.plugin_reload_enabled)
+
+
+def _plugin_status_response(status: PluginStatus) -> Dict[str, Any]:
+    """Map host state to the browser's compact dynamic-plugin resource schema."""
+
+    return {
+        "plugin_id": status.plugin_id,
+        "name": status.name,
+        "version": status.version,
+        "capabilities": list(status.capabilities),
+        "ui_kind": status.ui_kind,
+        "state": status.lifecycle_state,
+        "error": status.error,
+        "reloadable": status.reloadable,
+    }
 
 
 def _status_response(status: CameraPreviewStatus):

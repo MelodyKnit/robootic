@@ -27,6 +27,8 @@ const {
 const jointNames = ['J1', 'J2', 'J3', 'J4', 'J5', 'J6'] as const
 const jointDraftDegrees = ref<number[]>([0, 0, 0, 0, 0, 0])
 const speedRadPerSecond = ref(0.1)
+const stepDegrees = ref(2.0)
+const draftStepModeEnabled = ref(false)
 const confirmationMode = ref<ConfirmationMode | null>(null)
 const workcellClear = ref(false)
 const emergencyStopAvailable = ref(false)
@@ -132,7 +134,7 @@ watch(
     if (
       preview.value !== null &&
       !isBusy.value &&
-      !sameJointVector(status.jointPositionsRad, preview.value.sourceJointPositionsRad)
+      !sameJointVector(status.jointPositionsRad, preview.value.sourceJointPositionsRad, 0.001)
     ) {
       preview.value = null
       previewApproved.value = false
@@ -220,6 +222,23 @@ async function generatePreview(): Promise<void> {
     speedRadPerSecond: speedRadPerSecond.value,
   })
   previewApproved.value = false
+}
+
+/** Updates only the local target draft. Motion still requires preview and confirmation. */
+function adjustJointDraft(index: number, deltaDegrees: number): void {
+  const status = robot.value
+  if (status === null) {
+    return
+  }
+  const minimum = radiansToDegrees(status.jointLowerLimitsRad[index])
+  const maximum = radiansToDegrees(status.jointUpperLimitsRad[index])
+  const currentVal = jointDraftDegrees.value[index] ?? radiansToDegrees(status.jointPositionsRad[index])
+  const newVal = clamp(currentVal + deltaDegrees, minimum, maximum)
+
+  const nextDraft = [...jointDraftDegrees.value]
+  nextDraft[index] = newVal
+  jointDraftDegrees.value = nextDraft
+  discardPreview()
 }
 
 function updateJointDraft(index: number, event: Event): void {
@@ -321,8 +340,8 @@ function isJointVector(values: number[]): values is JointVector {
   return values.length === 6 && values.every(Number.isFinite)
 }
 
-function sameJointVector(first: JointVector, second: JointVector): boolean {
-  return first.every((value, index) => Math.abs(value - second[index]) < 0.000001)
+function sameJointVector(first: JointVector, second: JointVector, tolerance = 0.000001): boolean {
+  return first.every((value, index) => Math.abs(value - second[index]) < tolerance)
 }
 </script>
 
@@ -431,14 +450,36 @@ function sameJointVector(first: JointVector, second: JointVector): boolean {
       <fieldset class="space-y-3 py-4" :disabled="isBusy || robot === null">
         <div class="flex items-center justify-between gap-3">
           <legend class="text-xs font-bold text-slate-500">J1 - J6 绝对关节目标</legend>
-          <button
-            type="button"
-            class="text-[10px] font-semibold text-sky-400 hover:text-sky-300 disabled:cursor-not-allowed disabled:opacity-40"
-            :disabled="isBusy || robot === null"
-            @click="resetDraftToReadback()"
-          >
-            同步当前读数
-          </button>
+          <div class="flex items-center gap-3">
+            <label class="flex cursor-pointer items-center gap-1.5 text-[11px] font-semibold text-slate-300">
+              <input v-model="draftStepModeEnabled" type="checkbox" class="accent-sky-500" aria-label="启用草稿步进微调" />
+              启用草稿步进微调
+            </label>
+            <button
+              type="button"
+              class="text-[10px] font-semibold text-sky-400 hover:text-sky-300 disabled:cursor-not-allowed disabled:opacity-40"
+              :disabled="isBusy || robot === null"
+              @click="resetDraftToReadback()"
+            >
+              同步当前读数
+            </button>
+          </div>
+        </div>
+
+        <div v-if="draftStepModeEnabled" class="flex items-center justify-between gap-3 rounded border border-sky-900/50 bg-sky-950/30 p-2">
+          <span class="text-[11px] font-semibold text-sky-300">草稿微调增量 (deg):</span>
+          <div class="flex items-center gap-1">
+            <button
+              v-for="step in [0.5, 1.0, 2.0, 5.0]"
+              :key="step"
+              type="button"
+              class="rounded px-2 py-0.5 text-[10px] font-bold transition"
+              :class="stepDegrees === step ? 'bg-sky-600 text-white' : 'bg-slate-900 text-slate-400 hover:bg-slate-800'"
+              @click="stepDegrees = step"
+            >
+              ±{{ step }}°
+            </button>
+          </div>
         </div>
 
         <div v-for="(joint, index) in jointRows" :key="joint.name" class="rounded border border-slate-900 bg-slate-900/30 p-2.5">
@@ -447,21 +488,45 @@ function sameJointVector(first: JointVector, second: JointVector): boolean {
               <p class="text-xs font-bold text-slate-300">{{ joint.name }}</p>
               <p class="mt-0.5 font-mono text-[10px] text-slate-500">{{ formatDegrees(joint.currentDegrees) }} / {{ formatRadians(joint.currentRad) }}</p>
             </div>
-            <label class="block text-right text-[10px] font-semibold text-slate-500" :for="`robot-joint-${index}`">
-              目标角度 deg
-              <input
-                :id="`robot-joint-${index}`"
-                :aria-label="`${joint.name} 目标角度`"
-                class="mt-1 block w-24 rounded border border-slate-800 bg-slate-950 px-2 py-1 text-right font-mono text-xs font-bold text-slate-200 focus:outline-none focus:ring-1 focus:ring-slate-700 disabled:opacity-40"
-                type="number"
-                :min="joint.lowerDegrees"
-                :max="joint.upperDegrees"
-                step="0.1"
-                :value="joint.draftDegrees"
-                @change="updateJointDraft(index, $event)"
-                @input="updateJointDraft(index, $event)"
-              />
-            </label>
+            <div class="flex items-center gap-2">
+              <div v-if="draftStepModeEnabled" class="flex items-center gap-1">
+                <button
+                  type="button"
+                  class="rounded bg-slate-800 hover:bg-sky-700 px-2 py-1 text-xs font-bold text-slate-200 transition disabled:opacity-30 disabled:cursor-not-allowed"
+                  :aria-label="`减少 ${joint.name} 草稿角度`"
+                  :disabled="isBusy || robot === null"
+                  title="减少草稿角度"
+                  @click="adjustJointDraft(index, -stepDegrees)"
+                >
+                  -
+                </button>
+                <button
+                  type="button"
+                  class="rounded bg-slate-800 hover:bg-sky-700 px-2 py-1 text-xs font-bold text-slate-200 transition disabled:opacity-30 disabled:cursor-not-allowed"
+                  :aria-label="`增加 ${joint.name} 草稿角度`"
+                  :disabled="isBusy || robot === null"
+                  title="增加草稿角度"
+                  @click="adjustJointDraft(index, stepDegrees)"
+                >
+                  +
+                </button>
+              </div>
+              <label class="block text-right text-[10px] font-semibold text-slate-500" :for="`robot-joint-${index}`">
+                目标角度 deg
+                <input
+                  :id="`robot-joint-${index}`"
+                  :aria-label="`${joint.name} 目标角度`"
+                  class="mt-1 block w-24 rounded border border-slate-800 bg-slate-950 px-2 py-1 text-right font-mono text-xs font-bold text-slate-200 focus:outline-none focus:ring-1 focus:ring-slate-700 disabled:opacity-40"
+                  type="number"
+                  :min="joint.lowerDegrees"
+                  :max="joint.upperDegrees"
+                  step="0.1"
+                  :value="joint.draftDegrees"
+                  @change="updateJointDraft(index, $event)"
+                  @input="updateJointDraft(index, $event)"
+                />
+              </label>
+            </div>
           </div>
           <p class="mt-1 text-[9px] text-slate-600">软件范围 {{ formatDegrees(joint.lowerDegrees) }} 至 {{ formatDegrees(joint.upperDegrees) }}</p>
         </div>

@@ -14,6 +14,9 @@
       ],
       "observers": [
         "audit"
+      ],
+      "preview": [
+        "visual-pose-analysis"
       ]
     }
   },

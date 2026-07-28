@@ -11,7 +11,7 @@ export interface GripperStatus {
   initializing: boolean
   moving: boolean
   gripping: boolean
-  position: number
+  targetPosition: number
   positionIsFeedback: boolean
   gripState: string
   supportsStop: boolean
@@ -118,7 +118,7 @@ function parseGripperStatus(payload: unknown): GripperStatus {
     typeof payload.initializing !== 'boolean' ||
     typeof payload.moving !== 'boolean' ||
     typeof payload.gripping !== 'boolean' ||
-    !isInteger(payload.position) ||
+    !isInteger(payload.target_position) ||
     typeof payload.position_is_feedback !== 'boolean' ||
     typeof payload.grip_state !== 'string' ||
     typeof payload.supports_speed !== 'boolean' ||
@@ -141,8 +141,8 @@ function parseGripperStatus(payload: unknown): GripperStatus {
     payload.minimum_position >= payload.maximum_position ||
     payload.minimum_force_percent > payload.maximum_force_percent ||
     payload.minimum_speed_percent > payload.maximum_speed_percent ||
-    payload.position < payload.minimum_position ||
-    payload.position > payload.maximum_position ||
+    payload.target_position < payload.minimum_position ||
+    payload.target_position > payload.maximum_position ||
     payload.open_position < 0 ||
     payload.close_position < 0 ||
     payload.open_position < payload.minimum_position ||
@@ -162,7 +162,7 @@ function parseGripperStatus(payload: unknown): GripperStatus {
     initializing: payload.initializing,
     moving: payload.moving,
     gripping: payload.gripping,
-    position: payload.position,
+    targetPosition: payload.target_position,
     positionIsFeedback: payload.position_is_feedback,
     gripState: payload.grip_state,
     supportsStop: payload.supports_stop,

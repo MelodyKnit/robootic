@@ -179,10 +179,24 @@ def _web(args: argparse.Namespace) -> None:
         settings = replace(settings, port=args.port)
     if args.frontend_dist_dir is not None:
         settings = replace(settings, frontend_dist_dir=args.frontend_dist_dir)
-    settings = validate_web_settings(settings)
+    settings = validate_web_settings(settings, preview_config.runtime_mode)
     preview_config.settings = settings
-    application = create_web_app(preview_config, settings.frontend_dist_dir)
-    uvicorn.run(application, host=settings.bind_host, port=settings.port)
+    if args.reload:
+        if preview_config.runtime_mode.value != "development":
+            raise ValueError("--reload is available only when runtime_mode is development.")
+        import os
+        os.environ["GRIPPER_CONFIG_FILE"] = args.config_file
+        uvicorn.run(
+            "gripper_ai_controller.web.app:create_web_app_factory",
+            factory=True,
+            host=settings.bind_host,
+            port=settings.port,
+            reload=True,
+            reload_dirs=["src/gripper_ai_controller"],
+        )
+    else:
+        application = create_web_app(preview_config, settings.frontend_dist_dir)
+        uvicorn.run(application, host=settings.bind_host, port=settings.port)
 
 
 def _gpu_check(args: argparse.Namespace) -> None:
@@ -391,6 +405,7 @@ def main() -> None:
     web.add_argument("--host")
     web.add_argument("--port", type=int)
     web.add_argument("--frontend-dist-dir")
+    web.add_argument("--reload", action="store_true", help="Enable uvicorn auto-reload on code changes.")
     gpu_check = subparsers.add_parser("gpu-check", help="Inspect CUDA readiness without loading a pose model.")
     gpu_check.add_argument("--require-torch", action="store_true")
     weights = subparsers.add_parser(

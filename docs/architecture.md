@@ -34,8 +34,10 @@ flowchart LR
     Status[相机状态与重试] --> Api[GET /cameras 和 /status]
     Parameters[CameraParameterAdapter 固定白名单] --> Controls[参数读取与写入接口]
     Controls --> Camera
-    Loop --> Pose[PoseTrackingService 单线程最新帧队列]
-    Loop --> Quality[VisionAnalysisService 单线程抽样队列]
+    Loop --> FrameEvent[FrameCaptured]
+    FrameEvent --> PluginHost[网页预览 PluginHost]
+    PluginHost --> Pose[PoseTrackingService 单线程最新帧队列]
+    PluginHost --> Quality[VisionAnalysisService 单线程抽样队列]
     Pose --> Inference[CUDA PoseEstimator]
     Inference --> Candidates[人员候选与姿态缓存]
     Quality --> Analysis[VisionAnalysisService]
@@ -46,11 +48,19 @@ flowchart LR
     AnalysisApi --> Canvas
 ```
 
-`gripper_ai_controller.web` 是独立的 ASGI 服务图，默认组装一个 `VisionAdapter`、JPEG 编码器、内存帧缓存和可选的 `CameraParameterAdapter` 门面。它不构造 `Runtime`、规划/感知/审计插件或镜像目标。声明 `gripper_control` 或 `jaka_control` 时，它才会额外构造各自选中主目标的设备适配器和人工控制门面，以提供只读状态；只有本机配置开启对应网页控制开关后，门面才允许动作。夹爪门面独立调用 `SafetyPolicy.evaluate_gripper`；JAKA 门面使用独立的令牌、预览和关节约束流程。二者都不会启动自动规划或视觉跟随。海康采集、JPEG 编码、CUDA 姿态推理和质量诊断分别使用受限的单工作线程；每条慢路径最多有一个正在处理项和一个可替换的最新待处理项，避免形成历史帧积压。相机连接或取帧失败时，服务公开标准化的 `degraded` 状态并关闭后重试；JPEG 编码失败只标记当前预览降级，后续有效帧仍可发布。它不会把采集画面或错误写入项目存储目录。
+`gripper_ai_controller.web` 是独立的 ASGI 服务图，默认组装一个 `VisionAdapter`、JPEG 编码器、内存帧缓存、网页预览 `PluginHost` 和可选的 `CameraParameterAdapter` 门面。它不构造完整 `Runtime`、规划/感知/审计插件或镜像目标。声明 `gripper_control` 或 `jaka_control` 时，它才会额外构造各自选中主目标的设备适配器和人工控制门面，以提供只读状态；只有本机配置开启对应网页控制开关后，门面才允许动作。夹爪门面独立调用 `SafetyPolicy.evaluate_gripper`；JAKA 门面使用独立的令牌、预览和关节约束流程。二者都不会启动自动规划或视觉跟随。海康采集、JPEG 编码、CUDA 姿态推理和质量诊断分别使用受限的单工作线程；每条慢路径最多有一个正在处理项和一个可替换的最新待处理项，避免形成历史帧积压。相机连接或取帧失败时，服务公开标准化的 `degraded` 状态并关闭后重试；JPEG 编码失败只标记当前预览降级，后续有效帧仍可发布。它不会把采集画面或错误写入项目存储目录。
 
 可选的 `PoseTrackingService` 位于同一只读服务图中，但与相机 SDK 和运动运行时隔离。它从已获取的 `ImageFrame` 接收单个内存帧，在独立单工作线程中按 `pose.max_inference_fps` 至多运行一个 CUDA `PoseEstimator`，正在推理时只替换一个最新待处理帧。`TorchvisionKeypointRcnnEstimator` 会按 `pose.inference_max_side`（默认 `768`）等比缩图，并同步限制 Torchvision 内部图像变换，防止模型再次放大输入；随后将模型框和关键点映射回原始相机坐标。首版以最高置信度选择一人，再验证当前锁定 COCO 关节；人物或关节置信度不足即发布无效状态。启用姿态时，应用在启动采集前校验 CUDA 11.7 Torch 可用，不会回退到 CPU。`GET /pose` 还提供 `latest_frame_at` 和 `overlay_fresh`；浏览器底图始终使用 MJPEG，只有来源帧与最新预览帧差值不超过 `overlay_max_frame_lag_seconds` 时才绘制 Canvas 叠加。修改锁定关节通过 `PUT /pose/target` 写回显式本机配置；两者都不触发机器人命令。
 
 `VisionAnalysisService` 是只读门面：采集循环把质量诊断提交到有界内存缓存，姿态服务仍是唯一的 CUDA 推理调度者。质量检查先按 `vision_analysis.sample_max_side`（默认 `640`）缩采样，再在专用单工作线程中以 `max_analysis_fps`（默认 `1`）执行；忙碌时只保留最新待分析帧。`GET /vision/analysis` 将帧健康、已通过人体阈值的候选框、主人体和 COCO 关节可见性组合为稳定响应，不调用相机、不排队推理、不加载第二个人体检测模型。质量警告不会修改曝光、停止取流或阻断预览。离线 `vision-evaluate` 使用相同的质量与可见性策略读取受版本控制的公开图片，并分别走 RGB8 与确定性 Mono8 输入路径；它不构造网页或运行时图。
+
+## 网页预览 Plugin 主机
+
+网页 Plugin 通过 `components.plugins.preview` 显式配置，由 `PluginHost` 维护独立于 `Runtime` 的生命周期。采集循环在 JPEG 发布后投递 `FrameCaptured`；Plugin 只接收这个帧事件，不能取得适配器实例、设备客户端、执行目标或人工控制门面。当前受信任注册表只包含 `visual-pose-analysis`；新增标识必须先在服务端注册固定工厂，配置或浏览器请求不能引入任意 Python 模块。该 Plugin 组合现有姿态追踪和成像分析服务，为既有 `/pose`、`/pose/target` 与 `/vision/analysis` 接口提供只读快照。
+
+`GET /api/plugins` 和 `GET /api/plugins/{plugin_id}/status` 返回已配置 Plugin 的清单和状态；`POST /api/plugins/reload` 只能引用这些稳定 ID，空 `plugin_ids` 表示全部。重载时主机会暂停相应 Plugin 的帧分发、等待活动任务结束、启动替换实例后原子切换；新实例失败则继续保留旧实例。相机采集、最新 JPEG 缓存和 MJPEG 主画面在整个过程中不被重建。
+
+只有 `runtime_mode: "development"`、`web.bind_host: "127.0.0.1"` 和 `web.plugin_reload_enabled: true` 同时满足时，接口才允许重载。生产模式以及非回环监听地址必须拒绝重载并要求服务重启；该限制与夹爪/JAKA 的本机人工控制限制独立，不能通过浏览器请求放宽。
 
 ## 网页夹爪人工控制边界
 

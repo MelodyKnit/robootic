@@ -10,6 +10,7 @@ import unittest
 from gripper_ai_controller.adapters.pgi.adapter import (
     PgiTcpAdapterError,
     PgiTcpGripperAdapter,
+    PgiTcpOperationOutcomeUnknownError,
 )
 from gripper_ai_controller.adapters.pgi.client import (
     FRAME_FOOTER,
@@ -19,6 +20,7 @@ from gripper_ai_controller.adapters.pgi.client import (
     PgiTcpClient,
     PgiTcpProtocolError,
     PgiTcpTransportError,
+    PgiTcpWriteOutcomeUnknownError,
     READ_OPERATION,
     TARGET_FORCE_REGISTER,
     TARGET_POSITION_REGISTER,
@@ -40,10 +42,18 @@ def response_for(request, value=None):
 class FakeSocket:
     """Deterministic socket double that never opens a network connection."""
 
-    def __init__(self, responder=None, receive_chunk_size=14, send_error=None, connect_error=None):
+    def __init__(
+        self,
+        responder=None,
+        receive_chunk_size=14,
+        send_error=None,
+        receive_error=None,
+        connect_error=None,
+    ):
         self.responder = responder or (lambda request: response_for(request))
         self.receive_chunk_size = receive_chunk_size
         self.send_error = send_error
+        self.receive_error = receive_error
         self.connect_error = connect_error
         self.timeout = None
         self.endpoint = None
@@ -68,6 +78,10 @@ class FakeSocket:
         self.pending = self.responder(bytes(payload))
 
     def recv(self, length):
+        if self.receive_error is not None:
+            error = self.receive_error
+            self.receive_error = None
+            raise error
         if not self.pending:
             return b""
         chunk_length = min(length, self.receive_chunk_size, len(self.pending))
@@ -253,7 +267,7 @@ class PgiTcpClientTests(unittest.TestCase):
                 self.assertFalse(client.connected)
 
     def test_reconnects_and_retries_after_a_transport_timeout(self):
-        failed = FakeSocket(send_error=socket.timeout("timed out"))
+        failed = FakeSocket(receive_error=socket.timeout("timed out"))
         recovered = FakeSocket(responder=lambda request: response_for(request, 2))
         factory = FakeSocketFactory(failed, recovered)
         client = PgiTcpClient("test.invalid", retry_count=1, socket_factory=factory)
@@ -266,19 +280,25 @@ class PgiTcpClientTests(unittest.TestCase):
         self.assertTrue(client.connected)
         self.assertEqual(2, len(factory.created))
 
-    def test_does_not_retry_a_write_after_its_response_is_unavailable(self):
-        """A delivered write is never repeated merely because its acknowledgement is lost."""
+    def test_does_not_retry_a_write_after_recv_timeout(self):
+        """A delivered write is never repeated when its acknowledgement is unavailable."""
 
-        first_socket = FakeSocket(responder=lambda request: b"")
+        gateway = FakePgiGateway()
+        first_socket = FakeSocket(
+            responder=gateway.respond,
+            receive_error=socket.timeout("response timed out"),
+        )
         unused_socket = FakeSocket()
         factory = FakeSocketFactory(first_socket, unused_socket)
         client = PgiTcpClient("test.invalid", retry_count=1, socket_factory=factory)
 
         client.connect()
-        with self.assertRaisesRegex(PgiTcpTransportError, "was not retried"):
+        with self.assertRaisesRegex(PgiTcpWriteOutcomeUnknownError, "outcome is unknown"):
             client.set_target_position(250)
 
         self.assertEqual(1, len(first_socket.sent))
+        self.assertEqual(250, gateway.target_position)
+        self.assertEqual(1, len(gateway.writes))
         self.assertEqual(1, len(factory.created))
         self.assertTrue(first_socket.closed)
         self.assertFalse(client.connected)
@@ -472,6 +492,57 @@ class PgiTcpGripperAdapterTests(unittest.TestCase):
             self.assertFalse(adapter.supports_speed)
             self.assertFalse(adapter.supports_stop)
             self.assertEqual("physical", adapter.control_mode)
+            await adapter.shutdown()
+
+        run_async(scenario())
+
+    def test_adapter_surfaces_an_unconfirmed_write_as_an_unknown_outcome(self):
+        """An adapter must preserve the safety distinction after the client closes itself."""
+
+        class OutcomeUnknownClient:
+            """Minimal PGI client double that loses its acknowledgement after one write."""
+
+            def __init__(self):
+                self.connected = False
+                self.position_writes = 0
+
+            def connect(self):
+                self.connected = True
+
+            def close(self):
+                self.connected = False
+
+            def get_initialization_state(self):
+                return 1
+
+            def get_target_position(self):
+                return 500
+
+            def get_grip_state(self):
+                return 1
+
+            def set_target_position(self, position):
+                del position
+                self.position_writes += 1
+                self.connected = False
+                raise PgiTcpWriteOutcomeUnknownError("acknowledgement lost")
+
+        async def scenario():
+            client = OutcomeUnknownClient()
+            adapter = PgiTcpGripperAdapter(
+                "test.invalid",
+                client_factory=lambda: client,
+            )
+            await adapter.startup()
+
+            with self.assertRaises(PgiTcpOperationOutcomeUnknownError):
+                await adapter.execute(
+                    GripperCommand(GripperAction.MOVE_TO_POSITION, target_position=250)
+                )
+
+            self.assertEqual(1, client.position_writes)
+            self.assertFalse(adapter.last_status.connected)
+            self.assertIn("acknowledgement lost", adapter.last_status.last_error)
             await adapter.shutdown()
 
         run_async(scenario())

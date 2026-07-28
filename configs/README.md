@@ -17,6 +17,8 @@
 
 配置文件只包含组件标识符和非敏感运行设置。不得在此放置令牌、密码、私有 IP 地址、标定采集数据、模型权重或可变运行状态；此类内容应存放在 `localstore/`。
 
+`components.plugins.preview` 是网页预览 Plugin 的显式组件列表。版本化的可运行与示例组件图都声明 `"visual-pose-analysis"`，使人体姿态与成像质量分析能够以独立生命周期运行；缺少该列表的旧配置仍保持兼容，不会被隐式补写。当前受信任的网页预览注册表仅包含 `visual-pose-analysis`；配置其他标识会在服务启动时被拒绝。新增模块必须先在服务端以固定工厂和清单完成注册，不能使用 Python 模块路径或浏览器输入动态加载。离线图片评测和图像居中仿真不声明该列表，因为它们不启动网页服务或相机采集。
+
 使用本机 JAKA 配置读取六轴关节角时，从子项目根目录执行：
 
 ```powershell
@@ -62,8 +64,15 @@ poetry run gripper-ai-controller jaka-joint-dry-run --config-file configs/jaka-j
 - `camera_controls_enabled`：`false`，严格布尔值。设为 `true` 后允许网页写入当前相机适配器公开的固定参数白名单；版本化海康模板必须保持 `false`，真实写入仅可在 `localstore/` 本机配置显式开启。
 - `gripper_controls_enabled`：`false`，严格布尔值。设为 `true` 时必须同时提供 `gripper_control` 和一个选中的 `primary` 目标，且 `bind_host` 必须严格为 `"127.0.0.1"`；命令行 `--host` 也不能绕过该限制。
 - `jaka_controls_enabled`：`false`，严格布尔值。设为 `true` 时必须同时提供 `jaka_control` 和一个选中的 `primary` JAKA 目标，且 `bind_host` 必须严格为 `"127.0.0.1"`；命令行 `--host` 同样不能绕过该限制。
+- `plugin_reload_enabled`：`false`，严格布尔值。只有 `runtime_mode` 为 `"development"`、`bind_host` 严格为 `"127.0.0.1"` 且该开关为 `true` 时，网页才允许重载已配置的预览 Plugin；生产模式始终要求重启整个服务。
 
 未声明 `gripper_control` 或 `jaka_control` 时，网页服务只读取上述设置和 `camera`、`components.vision`、`components.vision_adapter_settings`、根 `camera_parameters`。即使同一配置还声明 `targets`、插件或安全设置，它也不会构建或启动它们。声明人工控制段后，服务只构造该段 `target_name` 指向的一个主设备以提供只读状态；只有相应控制开关启用时才允许人工动作。它不构造完整运行时、规划器或镜像目标。真实序列号、真实标定标识和本机覆盖仍必须置于被 Git 忽略的 `localstore/` 配置文件。
+
+## 网页预览 Plugin
+
+网页预览只读取 `components.plugins.preview` 中已注册的稳定 Plugin 标识，不接受浏览器提供的 Python 模块名。当前注册表只包含 `visual-pose-analysis`；它只消费采集循环发布的帧事件，组合姿态追踪与成像分析缓存，并不导入相机 SDK、不持有相机/夹爪/JAKA 适配器，也不能发起人工控制或运动指令。后续新增 Plugin 必须先在服务端以固定工厂注册，不能仅通过配置或网页请求引入。
+
+当本机开发重载条件全部满足时，可通过网页接口重载一个或多个已配置 Plugin；重载期间会暂停该 Plugin 的帧分发并丢弃等待分析的旧帧，JPEG 缓存与 MJPEG 主画面继续复用原有采集循环。新实例启动失败时保留原实例；生产配置和非回环监听地址必须拒绝重载请求。
 
 ## 夹爪网页控制段
 

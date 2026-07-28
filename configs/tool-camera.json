@@ -10,7 +10,8 @@
     "plugins": {
       "perception": "deterministic-perception",
       "planners": ["demonstration-planner"],
-      "observers": ["audit"]
+      "observers": ["audit"],
+      "preview": ["visual-pose-analysis"]
     }
   },
   "targets": [

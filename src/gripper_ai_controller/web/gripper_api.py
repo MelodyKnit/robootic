@@ -39,7 +39,7 @@ class GripperStatusResponse(BaseModel):
     initializing: bool
     moving: bool
     gripping: bool
-    position: int
+    target_position: int
     position_is_feedback: bool
     grip_state: str
     supports_speed: bool
@@ -126,7 +126,7 @@ def install_gripper_routes(
         response_model=GripperStatusResponse,
     )
     async def gripper_status(gripper_id: str):
-        """Read current device feedback without changing adapter or arm state."""
+        """Read the current known device state without changing adapter or arm state."""
 
         missing = _unknown_gripper_response(gripper_id, service)
         if missing is not None:
