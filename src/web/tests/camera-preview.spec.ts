@@ -8,7 +8,7 @@ test('显示可解码的实时相机画面', async ({ page }) => {
   await page.route('**://*/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     if (path === '/api/cameras') {
-      await fulfillJson(route, { cameras: [cameraStatus()] })
+      await fulfillJson(route, cameraCatalog())
       return
     }
     if (await fulfillPluginApi(route, path)) {
@@ -40,6 +40,8 @@ test('显示可解码的实时相机画面', async ({ page }) => {
   await page.goto('/', { waitUntil: 'domcontentloaded' })
 
   await expect(page.getByRole('heading', { name: '相机预览' })).toBeVisible()
+  await expect(page.getByTestId('camera-device-selector')).toHaveValue('sim-device')
+  await expect(page.getByTestId('camera-device-selector').locator('option')).toHaveCount(1)
   await expect(page.getByTestId('plugin-card-visual-pose-analysis')).toBeVisible()
   await expect(page.getByTestId('camera-adapter')).toBeVisible()
   await expect(page.getByTestId('gripper-adapter')).toBeVisible()
@@ -87,7 +89,7 @@ test('姿态刷新不会替换 MJPEG，过期时隐藏叠加且只在流错误�
       return
     }
     if (path === '/api/cameras') {
-      await fulfillJson(route, { cameras: [cameraStatus()] })
+      await fulfillJson(route, cameraCatalog())
       return
     }
     if (path === '/api/cameras/sim-camera/status') {
@@ -164,7 +166,7 @@ test('插件展开和重载不会替换连续 MJPEG，已注册的通用插件�
       return
     }
     if (path === '/api/cameras') {
-      await fulfillJson(route, { cameras: [cameraStatus()] })
+      await fulfillJson(route, cameraCatalog())
       return
     }
     if (path === '/api/cameras/sim-camera/status') {
@@ -218,7 +220,7 @@ test('锁定关节暂时不可用时仍显示新鲜人体骨架', async ({ page 
   await page.route('**://*/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     if (path === '/api/cameras') {
-      await fulfillJson(route, { cameras: [cameraStatus()] })
+      await fulfillJson(route, cameraCatalog())
       return
     }
     if (path === '/api/cameras/sim-camera/status') {
@@ -256,7 +258,7 @@ test('姿态读取失败会隐藏已有骨架而不重连实时画面', async ({
   await page.route('**://*/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     if (path === '/api/cameras') {
-      await fulfillJson(route, { cameras: [cameraStatus()] })
+      await fulfillJson(route, cameraCatalog())
       return
     }
     if (path === '/api/cameras/sim-camera/status') {
@@ -308,7 +310,7 @@ test('窄屏保持完整的预览宽度并将侧栏移到下方', async ({ page 
   await page.route('**://*/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     if (path === '/api/cameras') {
-      await fulfillJson(route, { cameras: [cameraStatus()] })
+      await fulfillJson(route, cameraCatalog())
       return
     }
     if (path === '/api/cameras/sim-camera/status') {
@@ -351,7 +353,7 @@ test('骨架按 object-contain 的实际相机像素区域绘制', async ({ page
   await page.route('**://*/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     if (path === '/api/cameras') {
-      await fulfillJson(route, { cameras: [cameraStatus()] })
+      await fulfillJson(route, cameraCatalog())
       return
     }
     if (path === '/api/cameras/sim-camera/status') {
@@ -395,12 +397,33 @@ test('骨架按 object-contain 的实际相机像素区域绘制', async ({ page
 const transparentGif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==', 'base64')
 const squareCameraSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1000" viewBox="0 0 1000 1000"><rect width="1000" height="1000" fill="#111827"/></svg>'
 
-function cameraStatus() {
+function cameraStatus(latestFrameAt = 1_000.2) {
   return {
     camera_id: 'sim-camera',
     state: 'streaming',
-    latest_frame_at: 1_000.2,
+    latest_frame_at: latestFrameAt,
     error: null,
+  }
+}
+
+function cameraCatalog(selectedDeviceId: string | null = 'sim-device') {
+  return {
+    cameras: [cameraStatus()],
+    devices: [cameraDevice('sim-device', selectedDeviceId === 'sim-device')],
+    selected_device_id: selectedDeviceId,
+    selection_enabled: true,
+    discovery_error: null,
+  }
+}
+
+function cameraDevice(deviceId: string, selected: boolean, displayName = '模拟相机') {
+  return {
+    device_id: deviceId,
+    display_name: displayName,
+    model_name: 'SIM-1000',
+    transport: 'simulation',
+    selected,
+    calibrated: true,
   }
 }
 

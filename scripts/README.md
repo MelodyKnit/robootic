@@ -12,7 +12,11 @@ python scripts/check_submission_paths.py
 
 ## 快捷批处理脚本 (Windows Batch Scripts)
 
-`scripts/` 目录下提供 Windows 环境下的项目级批处理入口。所有脚本都必须从 `gripper-ai-controller` 项目根目录执行，不会根据脚本位置切换目录，也不会自动选择 `localstore/` 本机配置。脚本只接受 Poetry `1.8.5`；检测到 Poetry 2.x 或其他版本会以中文错误信息停止，避免改写当前 `poetry.lock`。
+`scripts/` 目录下提供 Windows 环境下的项目级批处理入口。`install.bat` 与 `test.bat` 必须从 `gripper-ai-controller` 项目根目录执行；`run.bat` 会切换到自身所属的项目根目录。所有入口都使用项目既有 Poetry 环境，不会自动选择 `localstore/` 本机配置。
+
+项目执行入口支持 Poetry `>=1.7,<3`，已覆盖 Poetry 1.x 的兼容锁格式和 Poetry 2.x 的已有环境启动方式。`check_poetry.bat` 是运行和测试入口共用的版本检查器；低于 1.7 或未来未验证的 3.x 会被明确拒绝。首次安装和构建必须使用 Poetry 1.7/1.8，维护依赖锁必须使用 `lock.bat` 和 Poetry 1.8.5，以避免生成旧版无法读取的新锁格式。
+
+Poetry CLI 应独立运行在其支持的宿主 Python 中，不应安装进项目的 Python 3.7 环境。项目虚拟环境仍必须指向 `robotic` 的 Python 3.7；`pyproject.toml` 固定使用 `poetry-core==1.6.1`，以保证 Python 3.7 下的 PEP 517 构建可用。当前 Poetry 2.3 的解释器探测实现不能首次创建或构建 Python 3.7 环境，因此 2.x 只用于已经建立环境中的 `run.bat`、`test.bat` 和元数据检查。
 
 ### 1. 依赖安装脚本 (`install.bat`)
 ```cmd
@@ -43,3 +47,12 @@ python scripts/check_submission_paths.py
 :: 运行指定模块或测试方法
 .\scripts\test.bat tests.test_cli
 ```
+
+### 4. 锁文件维护脚本 (`lock.bat`)
+
+```cmd
+:: 仅重新计算项目元数据哈希，不更新已解析的软件包版本
+.\scripts\lock.bat
+```
+
+该入口只接受 Poetry 1.8.5。Poetry 2.x 可以正常执行安装、测试和启动，但不得用于重写 `poetry.lock`。

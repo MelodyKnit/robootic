@@ -18,6 +18,10 @@ class CameraParameterConfigStoreError(RuntimeError):
     """Report a configuration read or write failure without leaking filesystem details."""
 
 
+class CameraSelectionConfigStoreError(RuntimeError):
+    """Report a rejected local camera-selection persistence operation."""
+
+
 class CameraParameterConfigStore:
     """Persist normalized settings only to the JSON file selected by the CLI caller.
 
@@ -163,3 +167,66 @@ class CameraParameterConfigStore:
                     os.unlink(temporary_path)
                 except OSError:
                     pass
+
+
+class CameraSelectionConfigStore(CameraParameterConfigStore):
+    """Persist one opaque device selection in an explicit local configuration.
+
+    The selected value is stored in the dedicated ``camera_selection`` section,
+    leaving vendor adapter settings unchanged. This preserves the identity checks
+    used by camera-parameter and pose-target stores while keeping a physical serial
+    number out of the browser contract and versioned configuration templates.
+    """
+
+    def __init__(
+        self,
+        config_file: str,
+        camera_id: str,
+        vision_name: str,
+        vision_adapter_settings: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """Bind selection writes to one ignored ``localstore`` JSON document."""
+
+        super().__init__(config_file, camera_id, vision_name, vision_adapter_settings)
+        try:
+            resolved_config_file = self.config_file.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise CameraSelectionConfigStoreError(
+                "Camera selection persistence requires an existing local configuration."
+            ) from error
+        if not any(
+            part.lower() == "localstore"
+            for part in resolved_config_file.parent.parts
+        ):
+            raise CameraSelectionConfigStoreError(
+                "Camera selection persistence requires a configuration under localstore."
+            )
+        # Persist through the canonical target so ``..`` segments or a symlink cannot
+        # redirect a later atomic replacement into version-controlled configuration.
+        self.config_file = resolved_config_file
+
+    def persist_selected_device_id(self, device_id: str) -> str:
+        """Atomically replace only the selected opaque device identifier."""
+
+        if not isinstance(device_id, str) or not device_id.strip():
+            raise CameraSelectionConfigStoreError(
+                "The selected camera device identifier must be a non-empty string."
+            )
+        try:
+            payload = self._load_payload()
+            selection = payload.get("camera_selection")
+            if not isinstance(selection, dict) or selection.get("enabled") is not True:
+                raise CameraSelectionConfigStoreError(
+                    "Camera selection is not enabled by the local configuration."
+                )
+            selection = dict(selection)
+            selection["selected_device_id"] = device_id
+            payload["camera_selection"] = selection
+            self._write_atomically(payload)
+        except CameraSelectionConfigStoreError:
+            raise
+        except (CameraParameterConfigStoreError, OSError, ValueError) as error:
+            raise CameraSelectionConfigStoreError(
+                "The selected camera could not be saved to the local configuration."
+            ) from error
+        return device_id

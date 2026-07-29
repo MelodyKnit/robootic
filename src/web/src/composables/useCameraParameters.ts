@@ -25,6 +25,7 @@ export function useCameraParameters(cameraId: Ref<string | null>) {
   const restartDrafts = ref<Record<string, CameraParameterValue>>({})
   let requestController: AbortController | undefined
   let requestVersion = 0
+  let disposed = false
 
   const parameters = computed(() => cameraParameters.value?.parameters ?? [])
   const writeEnabled = computed(() => cameraParameters.value?.writeEnabled ?? false)
@@ -68,7 +69,7 @@ export function useCameraParameters(cameraId: Ref<string | null>) {
 
   /** Disables manual sliders when their corresponding automatic camera mode is active. */
   function isManualControlDisabled(parameter: CameraParameter): boolean {
-    if (isApplying.value || !writeEnabled.value) {
+    if (isLoading.value || isApplying.value || !writeEnabled.value) {
       return true
     }
     if (parameter.key === 'exposure_time_us') {
@@ -89,11 +90,13 @@ export function useCameraParameters(cameraId: Ref<string | null>) {
     const version = ++requestVersion
     requestController?.abort()
     requestController = undefined
+    cameraParameters.value = null
+    liveValues.value = {}
+    restartDrafts.value = {}
+    errorMessage.value = null
+    isApplying.value = false
     if (selectedCameraId === null) {
-      cameraParameters.value = null
-      liveValues.value = {}
-      restartDrafts.value = {}
-      errorMessage.value = null
+      isLoading.value = false
       return
     }
 
@@ -102,9 +105,10 @@ export function useCameraParameters(cameraId: Ref<string | null>) {
     errorMessage.value = null
     try {
       const response = await getCameraParameters(selectedCameraId, requestController.signal)
-      if (version !== requestVersion || cameraId.value !== selectedCameraId) {
+      if (disposed || version !== requestVersion || cameraId.value !== selectedCameraId) {
         return
       }
+      assertResponseCamera(response, selectedCameraId)
       synchronise(response, true)
     } catch (error) {
       if (isAbortError(error) || version !== requestVersion) {
@@ -126,17 +130,29 @@ export function useCameraParameters(cameraId: Ref<string | null>) {
       return
     }
 
+    const version = requestVersion
     isApplying.value = true
     errorMessage.value = null
     try {
       const response = await updateLiveCameraParameter(selectedCameraId, parameter.key, valueFor(parameter))
+      if (disposed || version !== requestVersion || cameraId.value !== selectedCameraId) {
+        return
+      }
+      assertResponseCamera(response, selectedCameraId)
       synchronise(response, false)
     } catch (error) {
+      if (disposed || version !== requestVersion || cameraId.value !== selectedCameraId) {
+        return
+      }
       const message = displayError(error)
       await load()
-      errorMessage.value = message
+      if (!disposed && cameraId.value === selectedCameraId) {
+        errorMessage.value = message
+      }
     } finally {
-      isApplying.value = false
+      if (!disposed && version === requestVersion && cameraId.value === selectedCameraId) {
+        isApplying.value = false
+      }
     }
   }
 
@@ -147,20 +163,32 @@ export function useCameraParameters(cameraId: Ref<string | null>) {
       return
     }
 
+    const version = requestVersion
     isApplying.value = true
     errorMessage.value = null
     try {
       const response = await applyRestartCameraParameters(selectedCameraId, restartChanges.value)
+      if (disposed || version !== requestVersion || cameraId.value !== selectedCameraId) {
+        return
+      }
+      assertResponseCamera(response, selectedCameraId)
       synchronise(response, true)
       if (!response.restartedAcquisition) {
         errorMessage.value = '相机未报告重新采集状态。'
       }
     } catch (error) {
+      if (disposed || version !== requestVersion || cameraId.value !== selectedCameraId) {
+        return
+      }
       const message = displayError(error)
       await load()
-      errorMessage.value = message
+      if (!disposed && cameraId.value === selectedCameraId) {
+        errorMessage.value = message
+      }
     } finally {
-      isApplying.value = false
+      if (!disposed && version === requestVersion && cameraId.value === selectedCameraId) {
+        isApplying.value = false
+      }
     }
   }
 
@@ -191,6 +219,8 @@ export function useCameraParameters(cameraId: Ref<string | null>) {
   )
 
   onBeforeUnmount(() => {
+    disposed = true
+    requestVersion += 1
     requestController?.abort()
   })
 
@@ -209,6 +239,12 @@ export function useCameraParameters(cameraId: Ref<string | null>) {
     load,
     valueFor,
     writeEnabled,
+  }
+}
+
+function assertResponseCamera(response: CameraParameters, expectedCameraId: string): void {
+  if (response.cameraId !== expectedCameraId) {
+    throw new CameraApiError(502, 'invalid_response', '相机参数响应来自非活动相机。')
   }
 }
 

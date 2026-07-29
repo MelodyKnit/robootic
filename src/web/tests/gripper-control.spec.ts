@@ -219,6 +219,13 @@ async function fulfillCameraApi(route: Route, path: string): Promise<boolean> {
   if (path === '/api/cameras') {
     await fulfillJson(route, {
       cameras: [{ camera_id: 'sim-camera', state: 'streaming', latest_frame_at: 1_000, error: null }],
+      devices: [{
+        device_id: 'sim-device', display_name: '模拟相机', model_name: 'SIM-1000',
+        transport: 'simulation', selected: true, calibrated: true,
+      }],
+      selected_device_id: 'sim-device',
+      selection_enabled: true,
+      discovery_error: null,
     })
     return true
   }

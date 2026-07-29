@@ -109,6 +109,8 @@ class VisionAnalysisService:
         self._visibility = JointVisibilityEvaluator(pose_settings.joint_confidence_threshold)
         self._qualities = OrderedDict()
         self._lock = None  # type: Optional[Any]
+        self._frame_state_reset_lock = None  # type: Optional[Any]
+        self._resetting_frame_state = False
         self._monotonic_clock = monotonic_clock or time.monotonic
         maximum_fps = float(getattr(settings, "max_analysis_fps", 1))
         self._analysis_interval_seconds = 1.0 / max(1.0, maximum_fps)
@@ -130,10 +132,10 @@ class VisionAnalysisService:
         it for coordination without making image analysis part of acquisition latency.
         """
 
-        if frame.camera_id != self.camera_id or self._stopped:
+        if frame.camera_id != self.camera_id or self._stopped or self._resetting_frame_state:
             return
         async with self._lock_for_current_loop():
-            if self._stopped:
+            if self._stopped or self._resetting_frame_state:
                 return
             # A new capture supersedes an unprocessed older diagnostic frame. The
             # active worker retains its own frame, so this is one active plus one
@@ -141,6 +143,32 @@ class VisionAnalysisService:
             self._pending_frame = frame
             if self._analysis_task is None or self._analysis_task.done():
                 self._analysis_task = asyncio.create_task(self._process_pending_frames())
+
+    async def reset_frame_state(self) -> None:
+        """Drain active diagnostics and clear cached metadata without closing the worker.
+
+        This reusable transition prevents quality results from a previously selected
+        camera from remaining visible after a switch. New frames are dropped during
+        the bounded drain and may be submitted again as soon as the reset completes.
+        """
+
+        async with self._frame_state_reset_lock_for_current_loop():
+            async with self._lock_for_current_loop():
+                self._resetting_frame_state = True
+                self._pending_frame = None
+                task = self._analysis_task
+            try:
+                if task is not None:
+                    await task
+                async with self._lock_for_current_loop():
+                    self._pending_frame = None
+                    if self._analysis_task is not None and self._analysis_task.done():
+                        self._analysis_task = None
+                    self._qualities.clear()
+                    self._last_analysis_started_at = None
+            finally:
+                async with self._lock_for_current_loop():
+                    self._resetting_frame_state = False
 
     async def shutdown(self) -> None:
         """Stop accepting frames and release the dedicated quality worker cleanly."""
@@ -301,3 +329,10 @@ class VisionAnalysisService:
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
+
+    def _frame_state_reset_lock_for_current_loop(self) -> Any:
+        """Serialize reusable resets while preserving Python 3.7 loop-safe construction."""
+
+        if self._frame_state_reset_lock is None:
+            self._frame_state_reset_lock = asyncio.Lock()
+        return self._frame_state_reset_lock

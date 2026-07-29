@@ -38,6 +38,8 @@ frame = await camera.capture()
 
 `hikvision/` 是 USB3 Vision 帧源和受限参数适配器。它将 MVS Python 封装与 Windows x64 运行库保留在项目内，并通过独立的 `CameraParameterAdapter` 端口公开固定白名单的运行时参数；不包含感知算法，不接受任意 MVS 节点、触发设置或设备持久化相机配置。网页服务在设备更新成功后才将实际生效值写回显式本机 JSON 的 `camera_parameters`，并在启动和重连的首帧前恢复；适配器本身不调用厂商持久化命令。具体白名单、并发锁和网页访问许可见 [海康适配器说明](hikvision/README.md)。
 
+支持网页物理设备切换的视觉适配器额外实现 `SelectableVisionAdapter`。该端口只返回硬件无关的 `CameraDeviceDescriptor`，并且只允许在适配器停止后改变选择；它不负责启动新设备或持久化配置。网页服务负责把发现、关闭、选择、启动、参数恢复、旧缓存清理和失败回滚串行化。适配器生成的 `device_id` 必须稳定且不暴露厂商序列号。
+
 `pgi/` 使用标准库 socket 封装项目原始资料中已经展示的 PGI TCP 网关协议。它仅支持连接、普通初始化、目标力、目标位置和状态读取；未验证的速度、软件停止和全行程重新标定不会暴露给运行时或网页。具体生命周期、协议校验和真机安全边界见 [PGI TCP 适配器说明](pgi/README.md)。
 
 未来的 CoppeliaSim 实现拥有自己的适配器子包。在实现前将其厂商库复制到本项目中；不要从 `documents/` 动态导入源码资产。

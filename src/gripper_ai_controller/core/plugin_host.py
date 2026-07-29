@@ -118,6 +118,8 @@ class PluginHost:
         self._reloading = set()
         self._state_lock = None  # type: Optional[Any]
         self._frame_dispatch_lock = None  # type: Optional[Any]
+        self._frame_state_reset_lock = None  # type: Optional[Any]
+        self._resetting_frame_state = False
         self._offered_frame_task = None  # type: Optional[asyncio.Task]
         self._pending_offered_frame = None  # type: Optional[Tuple[ImageFrame, Optional[Callable[[], Awaitable[None]]]]]
         self._subscribed = False
@@ -196,7 +198,7 @@ class PluginHost:
         if not isinstance(frame, ImageFrame):
             raise TypeError("PluginHost accepts ImageFrame instances only.")
         async with self._state_lock_for_current_loop():
-            active = self._started and any(
+            active = self._started and not self._resetting_frame_state and any(
                 plugin_id not in self._reloading for plugin_id in self._slots
             )
         if not active:
@@ -223,7 +225,7 @@ class PluginHost:
 
         if not isinstance(frame, ImageFrame):
             raise TypeError("PluginHost accepts ImageFrame instances only.")
-        if not self._started:
+        if not self._started or self._resetting_frame_state:
             return False
         active_task = self._offered_frame_task
         if active_task is not None and not active_task.done():
@@ -234,6 +236,58 @@ class PluginHost:
             self._deliver_offered_frames(frame, on_pose_inference_started)
         )
         return True
+
+    async def reset_frame_state(self) -> None:
+        """Drain offered frames and reset optional plugin caches without reloading modules.
+
+        The host first closes its latest-only frame handoff and waits for the active
+        delivery to finish. It then invokes each configured reset capability in
+        deterministic order while holding the frame-dispatch boundary, ensuring no
+        old camera result can be republished after the transition completes.
+        """
+
+        async with self._frame_state_reset_lock_for_current_loop():
+            async with self._state_lock_for_current_loop():
+                if not self._started:
+                    return
+                self._resetting_frame_state = True
+                self._pending_offered_frame = None
+                offered_frame_task = self._offered_frame_task
+            try:
+                if offered_frame_task is not None:
+                    await offered_frame_task
+                failures = []
+                async with self._frame_dispatch_lock_for_current_loop():
+                    async with self._state_lock_for_current_loop():
+                        if not self._started:
+                            return
+                        slots = tuple(self._slots.values())
+                    for slot in slots:
+                        resetter = getattr(slot.plugin, "reset_frame_state", None)
+                        if not callable(resetter):
+                            continue
+                        try:
+                            result = resetter()
+                            if not inspect.isawaitable(result):
+                                raise TypeError("Plugin frame-state reset must be awaitable.")
+                            await result
+                        except Exception as error:
+                            message = "Plugin frame-state reset failed: {0}".format(error)
+                            await self._record_error(slot.descriptor.plugin_id, message)
+                            failures.append((slot.descriptor.plugin_id, message))
+                if failures:
+                    failure_messages = "; ".join(
+                        "{0}: {1}".format(plugin_id, message)
+                        for plugin_id, message in failures
+                    )
+                    raise PluginHostError(
+                        "One or more plugin frame-state resets failed. {0}".format(
+                            failure_messages
+                        )
+                    )
+            finally:
+                async with self._state_lock_for_current_loop():
+                    self._resetting_frame_state = False
 
     async def _deliver_offered_frames(
         self,
@@ -369,7 +423,7 @@ class PluginHost:
             return
         async with self._frame_dispatch_lock_for_current_loop():
             async with self._state_lock_for_current_loop():
-                if not self._started:
+                if not self._started or self._resetting_frame_state:
                     return
                 slots = tuple(
                     slot
@@ -495,6 +549,13 @@ class PluginHost:
         if self._frame_dispatch_lock is None:
             self._frame_dispatch_lock = asyncio.Lock()
         return self._frame_dispatch_lock
+
+    def _frame_state_reset_lock_for_current_loop(self) -> Any:
+        """Serialize cache resets without binding a lock before the ASGI loop exists."""
+
+        if self._frame_state_reset_lock is None:
+            self._frame_state_reset_lock = asyncio.Lock()
+        return self._frame_state_reset_lock
 
     @staticmethod
     def _manifest_for(plugin: Plugin) -> ComponentManifest:

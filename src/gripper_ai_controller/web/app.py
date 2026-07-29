@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, StrictStr
+from pydantic import BaseModel, Field, StrictStr, validator
 
 from gripper_ai_controller.bootstrap.preview_builder import VisionPreviewConfig
 from gripper_ai_controller.configuration import SafetyLimits
@@ -22,7 +22,12 @@ from gripper_ai_controller.core.plugin_host import (
     PluginStatus,
     UnknownPluginError,
 )
-from gripper_ai_controller.domain.models import CameraParameter, CameraParameterApplyMode, RuntimeMode
+from gripper_ai_controller.domain.models import (
+    CameraDeviceDescriptor,
+    CameraParameter,
+    CameraParameterApplyMode,
+    RuntimeMode,
+)
 from gripper_ai_controller.domain.ports import CameraParameterError
 from gripper_ai_controller.pose.config_store import PoseTargetConfigStore
 from gripper_ai_controller.pose.gpu import inspect_cuda_gpu
@@ -34,18 +39,31 @@ from gripper_ai_controller.pose.models import (
 from gripper_ai_controller.pose.tracker import PoseTargetError
 from gripper_ai_controller.services.safety import SafetyPolicy
 from gripper_ai_controller.vision.models import VisionAnalysisSnapshot
-from gripper_ai_controller.web.config_store import CameraParameterConfigStore
+from gripper_ai_controller.web.config_store import (
+    CameraParameterConfigStore,
+    CameraSelectionConfigStore,
+)
 from gripper_ai_controller.web.gripper_api import install_gripper_routes
 from gripper_ai_controller.web.gripper_service import ManualGripperControlService
 from gripper_ai_controller.web.jaka_api import install_jaka_routes
 from gripper_ai_controller.web.jaka_service import ManualJakaControlService
-from gripper_ai_controller.web.models import CameraPreviewStatus, PosePreviewSnapshot
+from gripper_ai_controller.web.models import (
+    CameraCatalogSnapshot,
+    CameraPreviewStatus,
+    PosePreviewSnapshot,
+)
 from gripper_ai_controller.web.service import (
+    CameraDeviceNotFoundError,
     CameraParameterCapabilityError,
     CameraParameterOperationError,
     CameraParameterPersistenceError,
     CameraParameterWriteDisabledError,
     CameraPreviewService,
+    CameraSelectionCapabilityError,
+    CameraSelectionConflictError,
+    CameraSelectionDisabledError,
+    CameraSelectionOperationError,
+    CameraSelectionPersistenceError,
     PoseTargetPersistenceError,
     PoseTrackingCapabilityError,
 )
@@ -82,10 +100,39 @@ class CameraStatusResponse(BaseModel):
     error: Optional[CameraErrorResponse]
 
 
+class CameraDeviceResponse(BaseModel):
+    """Browser-safe physical camera metadata without a vendor serial number."""
+
+    device_id: str
+    display_name: str
+    model_name: str
+    transport: str
+    selected: bool
+    calibrated: bool
+
+
 class CameraListResponse(BaseModel):
-    """A resource-oriented list response retained for future multi-camera expansion."""
+    """One logical preview and its currently discoverable physical camera devices."""
 
     cameras: List[CameraStatusResponse]
+    devices: List[CameraDeviceResponse]
+    selected_device_id: Optional[str]
+    selection_enabled: bool
+    discovery_error: Optional[CameraErrorResponse]
+
+
+class CameraSelectionRequest(BaseModel):
+    """Select one freshly discovered opaque camera device identifier."""
+
+    device_id: StrictStr = Field(..., min_length=1)
+
+    @validator("device_id")
+    def reject_blank_device_id(cls, value: str) -> str:
+        """Reject whitespace-only identifiers through the standard 422 contract."""
+
+        if not value.strip():
+            raise ValueError("device_id must contain a non-whitespace character")
+        return value
 
 
 class CameraParameterResponse(BaseModel):
@@ -287,9 +334,10 @@ def create_web_app(
         preview_config.settings.gripper_controls_enabled
         or preview_config.settings.jaka_controls_enabled
         or preview_config.settings.plugin_reload_enabled
+        or preview_config.camera_selection_settings.enabled
     ) and preview_config.settings.bind_host != "127.0.0.1":
         raise ValueError(
-            "Browser gripper, JAKA, or plugin reload controls require a 127.0.0.1 preview configuration."
+            "Browser hardware controls, camera selection, and plugin reload require a 127.0.0.1 preview configuration."
         )
     if preview_config.pose_settings.enabled:
         preflight = inspect_cuda_gpu()
@@ -303,6 +351,18 @@ def create_web_app(
         parameter_store = None
         if preview_config.config_file is not None and preview_config.vision_name is not None:
             parameter_store = CameraParameterConfigStore(
+                preview_config.config_file,
+                preview_config.camera_id,
+                preview_config.vision_name,
+                preview_config.vision_adapter_settings,
+            )
+        camera_selection_store = None
+        if preview_config.camera_selection_settings.enabled:
+            if preview_config.config_file is None or preview_config.vision_name is None:
+                raise ValueError(
+                    "Camera selection requires an explicit local JSON configuration file."
+                )
+            camera_selection_store = CameraSelectionConfigStore(
                 preview_config.config_file,
                 preview_config.camera_id,
                 preview_config.vision_name,
@@ -326,6 +386,8 @@ def create_web_app(
             parameter_store=parameter_store,
             pose_target_store=pose_target_store,
             plugin_host=plugin_host,
+            camera_selection_settings=preview_config.camera_selection_settings,
+            camera_selection_store=camera_selection_store,
         )
     else:
         service = preview_service
@@ -404,9 +466,59 @@ def create_web_app(
 
     @application.get("/api/cameras", response_model=CameraListResponse)
     async def list_cameras() -> CameraListResponse:
-        """Return the configured camera list without starting any additional capture task."""
+        """Return the logical preview plus a fresh physical-device discovery snapshot."""
 
-        return {"cameras": [_status_response(await service.hub.status())]}
+        return _camera_catalog_response(await service.get_camera_catalog())
+
+    @application.put(
+        "/api/cameras/{camera_id}/selection",
+        response_model=CameraListResponse,
+    )
+    async def select_camera(camera_id: str, request: CameraSelectionRequest):
+        """Select one discovered device without changing the logical preview resource."""
+
+        unknown = _unknown_camera_response(camera_id, service.camera_id)
+        if unknown is not None:
+            return unknown
+        try:
+            catalog = await service.select_camera_device(request.device_id)
+        except CameraSelectionDisabledError:
+            return _error_response(
+                403,
+                "camera_selection_disabled",
+                "Camera selection is disabled by the local preview configuration.",
+            )
+        except CameraSelectionCapabilityError:
+            return _error_response(
+                409,
+                "camera_selection_unavailable",
+                "The configured camera does not support physical-device selection.",
+            )
+        except CameraDeviceNotFoundError:
+            return _error_response(
+                404,
+                "camera_device_not_found",
+                "The requested camera device is no longer available.",
+            )
+        except CameraSelectionConflictError:
+            return _error_response(
+                409,
+                "camera_selection_in_progress",
+                "Another camera selection is already in progress.",
+            )
+        except CameraSelectionPersistenceError:
+            return _error_response(
+                503,
+                "camera_selection_persistence_failed",
+                "The camera switch was rolled back because the local selection could not be saved.",
+            )
+        except CameraSelectionOperationError:
+            return _error_response(
+                503,
+                "camera_selection_failed",
+                "The requested camera could not be activated; the previous source was preserved when possible.",
+            )
+        return _camera_catalog_response(catalog)
 
     @application.get("/api/plugins", response_model=PluginListResponse)
     async def list_plugins() -> PluginListResponse:
@@ -746,6 +858,37 @@ def _status_response(status: CameraPreviewStatus):
         "state": status.state,
         "latest_frame_at": status.latest_frame_at,
         "error": error,
+    }
+
+
+def _camera_catalog_response(catalog: CameraCatalogSnapshot) -> Dict[str, Any]:
+    """Serialize one active pipeline and its browser-safe device discovery result."""
+
+    discovery_error = None
+    if catalog.discovery_error is not None:
+        discovery_error = {
+            "code": catalog.discovery_error.code,
+            "message": catalog.discovery_error.message,
+        }
+    return {
+        "cameras": [_status_response(catalog.status)],
+        "devices": [_camera_device_response(device) for device in catalog.devices],
+        "selected_device_id": catalog.selected_device_id,
+        "selection_enabled": catalog.selection_enabled,
+        "discovery_error": discovery_error,
+    }
+
+
+def _camera_device_response(device: CameraDeviceDescriptor) -> Dict[str, Any]:
+    """Map an adapter descriptor without exposing vendor-native device metadata."""
+
+    return {
+        "device_id": device.device_id,
+        "display_name": device.display_name,
+        "model_name": device.model_name,
+        "transport": device.transport,
+        "selected": device.selected,
+        "calibrated": device.calibrated,
     }
 
 

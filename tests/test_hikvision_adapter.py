@@ -5,6 +5,7 @@ import sys
 import threading
 import unittest
 from ctypes import POINTER, Structure, c_ubyte, c_uint, c_ulonglong, cast
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from gripper_ai_controller.adapters.hikvision import HikvisionAdapter, HikvisionAdapterError
@@ -26,12 +27,24 @@ from gripper_ai_controller.web.service import CameraPreviewService
 class FakeMvsUsbClient:
     """Emulate the adapter-facing MVS client without importing native SDK files."""
 
-    def __init__(self, payload=None, open_error=None, capture_error=None, set_error=None):
+    def __init__(
+        self,
+        payload=None,
+        open_error=None,
+        capture_error=None,
+        set_error=None,
+        devices=None,
+    ):
         self.payload = payload or MvsCapturedFrame(b"\x10\x20\x30", 1, 1, "rgb8")
         self.open_error = open_error
         self.capture_error = capture_error
         self.set_error = set_error
         self.calls = []
+        self.devices = tuple(
+            devices
+            or (MvsUsbDevice("serial-a", "model-a", object()),)
+        )
+        self.selected_device_id = None
         self.float_nodes = {
             "ExposureTime": MvsFloatNodeValue(8000.0, 20.0, 100000.0),
             "Gain": MvsFloatNodeValue(0.0, 0.0, 24.0),
@@ -48,6 +61,23 @@ class FakeMvsUsbClient:
         self.calls.append(("open_camera", camera_serial))
         if self.open_error is not None:
             raise self.open_error
+        selected = MvsUsbCameraClient.select_device(self.devices, camera_serial)
+        self.selected_device_id = MvsUsbCameraClient.camera_device_id(
+            selected.serial_number
+        )
+
+    def open_camera_device(self, device_id):
+        self.calls.append(("open_camera_device", device_id))
+        if self.open_error is not None:
+            raise self.open_error
+        selected = MvsUsbCameraClient.select_device_by_id(self.devices, device_id)
+        self.selected_device_id = MvsUsbCameraClient.camera_device_id(
+            selected.serial_number
+        )
+
+    def discover_usb_devices(self):
+        self.calls.append(("discover_usb_devices",))
+        return self.devices
 
     def capture_frame(self, timeout_ms):
         self.calls.append(("capture_frame", timeout_ms))
@@ -57,6 +87,7 @@ class FakeMvsUsbClient:
 
     def close_camera(self):
         self.calls.append(("close_camera",))
+        self.selected_device_id = None
 
     def start_grabbing(self):
         self.calls.append(("start_grabbing",))
@@ -123,6 +154,24 @@ class BlockingMvsUsbClient(FakeMvsUsbClient):
 
         self.close_while_capturing = not self.capture_returned.is_set()
         super().close_camera()
+
+
+class BlockingOpenMvsUsbClient(FakeMvsUsbClient):
+    """Hold a native open call so startup cancellation can be asserted safely."""
+
+    def __init__(self):
+        """Create synchronization points around the fake blocking SDK call."""
+
+        super().__init__()
+        self.open_started = threading.Event()
+        self.allow_open_return = threading.Event()
+
+    def open_camera(self, camera_serial):
+        """Finish opening only after the cancellation test explicitly releases it."""
+
+        self.open_started.set()
+        self.allow_open_return.wait(2.0)
+        super().open_camera(camera_serial)
 
 
 class FakeFrameInfo(Structure):
@@ -518,6 +567,29 @@ class HikvisionAdapterTests(unittest.TestCase):
 
         self.run_async(scenario())
 
+    def test_startup_cancellation_remains_cancelled_after_native_open_cleanup(self):
+        async def scenario():
+            client = BlockingOpenMvsUsbClient()
+            adapter = HikvisionAdapter("camera-a", client_factory=lambda: client)
+            startup_task = asyncio.create_task(adapter.startup())
+            for _ in range(100):
+                if client.open_started.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            self.assertTrue(client.open_started.is_set())
+
+            startup_task.cancel()
+            client.allow_open_return.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(startup_task, timeout=1.0)
+
+            self.assertFalse(adapter.started)
+            self.assertFalse(adapter.connected)
+            self.assertIsNone(adapter._client)
+            self.assertEqual(("close_camera",), client.calls[-1])
+
+        self.run_async(scenario())
+
     def test_device_selection_requires_a_serial_when_multiple_cameras_exist(self):
         first = MvsUsbDevice("serial-a", "model-a", object())
         second = MvsUsbDevice("serial-b", "model-b", object())
@@ -527,6 +599,197 @@ class HikvisionAdapterTests(unittest.TestCase):
             MvsUsbCameraClient.select_device((first, second), None)
         with self.assertRaises(MvsCameraClientError):
             MvsUsbCameraClient.select_device((first,), "serial-missing")
+
+    def test_opaque_device_ids_are_stable_and_select_without_exposing_serials(self):
+        first = MvsUsbDevice("serial-a", "model-a", object())
+        second = MvsUsbDevice("serial-b", "model-b", object())
+        first_id = MvsUsbCameraClient.camera_device_id(first.serial_number)
+
+        self.assertEqual(first_id, MvsUsbCameraClient.camera_device_id("serial-a"))
+        self.assertNotEqual(first_id, MvsUsbCameraClient.camera_device_id("serial-b"))
+        self.assertNotIn("serial-a", first_id)
+        self.assertIs(
+            first,
+            MvsUsbCameraClient.select_device_by_id((first, second), first_id),
+        )
+        with self.assertRaises(MvsCameraClientError):
+            MvsUsbCameraClient.select_device_by_id((first, second), "missing")
+
+    def test_native_discovery_pairs_initialize_and_finalize_without_opening_a_device(self):
+        calls = []
+
+        class FakeMvsLifecycle:
+            @staticmethod
+            def MV_CC_Initialize():
+                calls.append("initialize")
+                return 0
+
+            @staticmethod
+            def MV_CC_Finalize():
+                calls.append("finalize")
+                return 0
+
+        client = MvsUsbCameraClient()
+        client._sdk = SimpleNamespace(MvCamera=FakeMvsLifecycle)
+
+        def enumerate_devices():
+            calls.append("enumerate")
+            return (MvsUsbDevice("serial-a", "model-a", object()),)
+
+        client.enumerate_usb_devices = enumerate_devices
+        devices = client.discover_usb_devices()
+
+        self.assertEqual(("serial-a",), tuple(device.serial_number for device in devices))
+        self.assertEqual(["initialize", "enumerate", "finalize"], calls)
+        self.assertFalse(client._initialized)
+        self.assertFalse(client._opened)
+
+    def test_native_discovery_finalizes_after_enumeration_failure(self):
+        calls = []
+
+        class FakeMvsLifecycle:
+            @staticmethod
+            def MV_CC_Initialize():
+                calls.append("initialize")
+                return 0
+
+            @staticmethod
+            def MV_CC_Finalize():
+                calls.append("finalize")
+                return 0
+
+        client = MvsUsbCameraClient()
+        client._sdk = SimpleNamespace(MvCamera=FakeMvsLifecycle)
+
+        def fail_enumeration():
+            calls.append("enumerate")
+            raise RuntimeError("enumeration failed")
+
+        client.enumerate_usb_devices = fail_enumeration
+        with self.assertRaisesRegex(RuntimeError, "enumeration failed"):
+            client.discover_usb_devices()
+
+        self.assertEqual(["initialize", "enumerate", "finalize"], calls)
+        self.assertFalse(client._initialized)
+
+    def test_native_discovery_clears_initialized_state_after_finalize_failure(self):
+        calls = []
+
+        class FakeMvsLifecycle:
+            @staticmethod
+            def MV_CC_Initialize():
+                calls.append("initialize")
+                return 0
+
+            @staticmethod
+            def MV_CC_Finalize():
+                calls.append("finalize")
+                return 1
+
+        client = MvsUsbCameraClient()
+        client._sdk = SimpleNamespace(MvCamera=FakeMvsLifecycle)
+        client.enumerate_usb_devices = lambda: (
+            MvsUsbDevice("serial-a", "model-a", object()),
+        )
+
+        with self.assertRaisesRegex(MvsCameraClientError, "MV_CC_Finalize"):
+            client.discover_usb_devices()
+
+        self.assertEqual(["initialize", "finalize"], calls)
+        self.assertFalse(client._initialized)
+
+    def test_automatic_single_camera_selection_becomes_a_stable_device_selection(self):
+        async def scenario():
+            client = FakeMvsUsbClient()
+            adapter = HikvisionAdapter("camera-a", client_factory=lambda: client)
+
+            await adapter.startup()
+            selected_device_id = adapter.selected_camera_device_id
+            self.assertIsNotNone(selected_device_id)
+            await adapter.shutdown()
+
+            client.calls.clear()
+            await adapter.startup()
+            self.assertEqual(
+                ("open_camera_device", selected_device_id),
+                client.calls[0],
+            )
+            await adapter.shutdown()
+
+        self.run_async(scenario())
+
+    def test_adapter_discovers_selects_and_calibrates_devices_only_while_stopped(self):
+        async def scenario():
+            first = MvsUsbDevice("serial-a", "model-a", object())
+            second = MvsUsbDevice("serial-b", "model-b", object())
+            second_id = MvsUsbCameraClient.camera_device_id("serial-b")
+            client = FakeMvsUsbClient(devices=(first, second))
+            adapter = HikvisionAdapter(
+                "camera-a",
+                calibration_id="calibration-a",
+                camera_serial="serial-a",
+                client_factory=lambda: client,
+                device_calibration_ids={second_id: "calibration-b"},
+            )
+
+            devices = await adapter.list_camera_devices()
+            self.assertEqual(2, len(devices))
+            self.assertTrue(devices[0].selected)
+            self.assertTrue(devices[0].calibrated)
+            self.assertTrue(devices[1].calibrated)
+            self.assertEqual("usb3-vision", devices[1].transport)
+            self.assertNotIn("serial-a", repr(devices))
+            self.assertNotIn("serial-b", repr(devices))
+
+            selected = await adapter.configure_camera_device(second_id)
+            self.assertIsNotNone(selected)
+            self.assertTrue(selected.selected)
+            self.assertEqual(second_id, adapter.selected_camera_device_id)
+            self.assertEqual("calibration-b", adapter.calibration_id)
+
+            client.calls.clear()
+            await adapter.startup()
+            self.assertEqual(("open_camera_device", second_id), client.calls[0])
+            with self.assertRaisesRegex(HikvisionAdapterError, "must be stopped"):
+                await adapter.configure_camera_device(
+                    MvsUsbCameraClient.camera_device_id("serial-a")
+                )
+            self.assertEqual(second_id, adapter.selected_camera_device_id)
+            await adapter.shutdown()
+
+            restored = await adapter.configure_camera_device(None)
+            self.assertIsNone(restored)
+            self.assertIsNone(adapter.selected_camera_device_id)
+            self.assertIsNone(adapter.calibration_id)
+
+        self.run_async(scenario())
+
+    def test_selected_device_id_has_priority_and_unmapped_new_device_is_uncalibrated(self):
+        async def scenario():
+            first = MvsUsbDevice("serial-a", "model-a", object())
+            second = MvsUsbDevice("serial-b", "model-b", object())
+            first_id = MvsUsbCameraClient.camera_device_id("serial-a")
+            second_id = MvsUsbCameraClient.camera_device_id("serial-b")
+            client = FakeMvsUsbClient(devices=(first, second))
+            adapter = HikvisionAdapter(
+                "camera-a",
+                calibration_id="calibration-a",
+                camera_serial="serial-a",
+                selected_device_id=second_id,
+                client_factory=lambda: client,
+            )
+
+            await adapter.startup()
+            self.assertEqual(("open_camera_device", second_id), client.calls[0])
+            self.assertEqual(second_id, adapter.selected_camera_device_id)
+            self.assertIsNone(adapter.calibration_id)
+            await adapter.shutdown()
+
+            await adapter.configure_camera_device(first_id)
+            self.assertEqual(first_id, adapter.selected_camera_device_id)
+            self.assertEqual("calibration-a", adapter.calibration_id)
+
+        self.run_async(scenario())
 
     def test_native_client_normalizes_mono_rgb_and_bayer_frames_and_releases_buffers(self):
         cases = (

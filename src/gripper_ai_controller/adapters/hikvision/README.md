@@ -10,6 +10,8 @@
 - `update_camera_parameters()`：只允许自动曝光 `ExposureAuto`、曝光时间 `ExposureTime`、自动增益 `GainAuto`、增益 `Gain`、帧率开关 `AcquisitionFrameRateEnable`、帧率 `AcquisitionFrameRate` 和像素格式 `PixelFormat`。曝光、增益和帧率为实时参数；像素格式需停止取流后应用，再自动恢复取流。该方法不会接受任意节点名、触发模式或持久化用户设置。
 - `shutdown()`：先等待正在执行的原生取帧返回，再按停止取流、关闭设备、销毁句柄、反初始化 SDK 的顺序释放资源。关闭请求最多受当前 `frame_timeout_ms` 与底层 SDK 返回时间影响，不能并发释放正在被 MVS 调用使用的句柄。
 - 未配置 `camera_serial` 时，只有枚举到一台 MVS USB 相机才允许打开；存在多台设备时必须从本机私有配置指定序列号。
+- `list_camera_devices()`：只读枚举当前 MVS USB 设备并返回不透明 ID、显示名称和型号，不打开第二个相机句柄，也不暴露厂商序列号。
+- `configure_camera_device()`：只允许在适配器已停止时切换到刚刚枚举到的设备；打开、回滚和本机持久化由网页服务生命周期统一协调。
 
 默认 `frame_delivery_mode` 为 `latest_only`。每次 MVS 相机句柄打开且开始取流前，适配器会设置 `MV_GrabStrategy_LatestImagesOnly`，使后续取帧丢弃等待队列中的旧图像并优先交付当前画面。已连接 USB 相机在开始取流后设置该策略会返回调用顺序错误，因此该设置失败会阻止本次取流并报告相机错误，不会静默回退为 FIFO。`sequential` 仅为未来离线逐帧任务保留；它显式使用 `MV_GrabStrategy_OneByOne`，不能用于低延迟网页预览。适配器所有原生 MVS 调用共用一个专用单工作线程，避免 SDK 取帧、节点操作和关闭过程与网页的其它后台任务争用默认线程池。
 
@@ -24,6 +26,8 @@
 受版本控制的 [配置模板](../../../../../configs/hikvision-usb.example.json) 不包含真实序列号或标定数据。将模板复制到 `localstore/` 后填入相机序列号和真实标定标识，再通过显式 `--config-file` 传入运行时。
 
 `camera_id` 与 `calibration_id` 分别用于帧标识和标定关联。它们不改变设备本身的 UserID、曝光、触发或其他相机参数。网页参数写入还必须由 `web.camera_controls_enabled` 在本机私有配置中显式开启；适配器本身不读取配置开关，网页服务负责该访问许可。
+
+网页多设备选择使用 `camera_selection.selected_device_id`，其值是根据序列号单向派生的稳定不透明标识；旧的本机 `camera_serial` 配置继续兼容，但不会通过 Web 返回。`camera_selection.calibration_ids` 可为每个不透明设备 ID 绑定独立标定。切换到未绑定设备时 `ImageFrame.calibration_id` 为 `None`，避免把旧相机标定错误套用到新画面。
 
 参数写入成功后，网页服务会把适配器确认的实际生效参数写回启动时显式传入 JSON 的根 `camera_parameters`，并在适配器启动或断连重连后的首帧前恢复。实际海康配置必须置于 Git 忽略的 `localstore/`；受版本控制的 `configs/` 文件仅作为模板。若设备已成功更新而 JSON 写回失败，调用方会收到“设备已生效、配置未保存”的明确失败，设备不会被回滚。实现不会调用 `MV_CC_FeatureSave`、`UserSetSave` 或其他厂商持久化命令。取帧、读取、写入、停止取流、恢复取流和关闭共用同一异步锁，避免 MVS 句柄被并发调用。
 

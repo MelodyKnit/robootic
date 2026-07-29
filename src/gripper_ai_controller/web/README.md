@@ -6,7 +6,8 @@
 
 ## 接口
 
-- `GET /api/cameras`：配置的相机列表及预览状态。
+- `GET /api/cameras`：返回一个逻辑预览状态、当前发现的物理设备列表、选中设备、选择开关和独立的发现错误；设备标识不包含厂商序列号。
+- `PUT /api/cameras/{camera_id}/selection`：请求体为 `{ "device_id": "..." }`，选择刚刚发现的物理设备。仅显式启用的回环本机配置可用；禁用为 `403`，设备消失为 `404`，并发切换为 `409`，打开、回滚或持久化失败为 `503`。
 - `GET /api/cameras/{camera_id}/status`：相机状态，字段为 `camera_id`、`state`、`latest_frame_at` 和 `error`；不提供帧序号。
 - `GET /api/cameras/{camera_id}/frame`：最新 JPEG 快照；首帧未准备好时返回 `503`。
 - `GET /api/cameras/{camera_id}/stream`：MJPEG 连续流；所有浏览器复用同一采集循环和最新 JPEG 缓存。
@@ -45,6 +46,14 @@ JAKA 接口同样使用 `{ "code", "message" }` 错误格式：控制未启用�
 姿态响应包含 `enabled`、`valid`、`reason`、`target_joint`、可选 `target`、可选 `person`、`inference_latency_ms`、`lost_frames`、可选 `motion`、`draw_skeleton`、`latest_frame_at` 和 `overlay_fresh`。`motion` 只描述连续两个已关联有效帧中锁定关节的归一化图像位移与速度，并在目标丢失、人体关联失败、目标切换、时间戳倒退或采集间隔超限后为 `null`；它不含真实距离、三维速度或控制命令。`valid` 只表示所选目标关节是否满足锁定资格；只要 `person` 存在且其来源帧不晚于最新 JPEG、两者时间差不超过 `pose.overlay_max_frame_lag_seconds`，`overlay_fresh` 就为 `true`，浏览器即可绘制人体框和其余骨架。过期时只隐藏叠加，视频流继续播放。网页主画面始终保持 `GET /stream` 的 MJPEG；`/pose/frame` 是独立诊断接口，不参与主画面切换。`person` 内是归一化坐标及原始像素坐标的 COCO 关节点，不含图像载荷、模型张量或任何可执行控制命令。姿态未启用时 `GET /pose` 仍返回 `200` 和 `enabled: false`，而更新目标返回 `409`；无效关节返回 `422`。详情见 [姿态感知包说明](../pose/README.md)。
 
 成像分析响应包含 `frame`、`person_count`、`persons`、`selected_person`、`joint_visibility` 和 `visible_joint_names`。`frame` 只含尺寸、像素格式、亮度均值、对比度、拉普拉斯方差清晰度和非阻断警告；`persons` 直接复用最近一次 Keypoint R-CNN 推理中通过人体阈值的候选，不会加载第二个人体检测模型。姿态未启用时接口仍返回 `200`，并提供帧质量但 `pose_enabled: false`；未知相机继续返回 `404`。详情见 [视觉分析包说明](../vision/README.md)。
+
+## 相机发现与选择边界
+
+`SelectableVisionAdapter` 是独立于取帧和参数控制的可选能力。网页只看到适配器生成的稳定不透明 ID、显示名称、型号、传输类型、选中状态和是否具有标定映射；厂商序列号、SDK 结构和客户端对象不会进入 HTTP 响应。发现失败只附加到目录响应，不会中断当前已工作的画面。
+
+网页服务仍只有一个逻辑 `camera_id`、一个采集循环和一个 `FrameHub`。切换设备时，服务先阻止新的采集和 Plugin 帧投递，再关闭旧设备、配置并打开新设备、恢复已授权参数、清空旧 JPEG、姿态、运动基线和成像质量缓存，最后原子写回显式 `localstore/` 配置作为提交点。写入已开始时会屏蔽协程取消并等待真实结果：成功则保留新设备，失败则恢复旧设备，避免运行态与下次启动配置不一致。浏览器始终保持同一个 MJPEG URL，服务也绝不同时打开两台相机。
+
+相机选择必须同时满足 `camera_selection.enabled: true`、配置文件位于 `localstore/`、服务绑定 `127.0.0.1`。网页参数写入仍由独立的 `web.camera_controls_enabled` 控制；开启选择不会自动开放曝光等参数写入。新设备没有 `camera_selection.calibration_ids` 映射时只允许预览和 2D 视觉结果，不能声称已获得机器人基座坐标标定。
 
 ## 网页预览 Plugin 边界
 

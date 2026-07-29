@@ -68,6 +68,16 @@ poetry run gripper-ai-controller jaka-joint-dry-run --config-file configs/jaka-j
 
 未声明 `gripper_control` 或 `jaka_control` 时，网页服务只读取上述设置和 `camera`、`components.vision`、`components.vision_adapter_settings`、根 `camera_parameters`。即使同一配置还声明 `targets`、插件或安全设置，它也不会构建或启动它们。声明人工控制段后，服务只构造该段 `target_name` 指向的一个主设备以提供只读状态；只有相应控制开关启用时才允许人工动作。它不构造完整运行时、规划器或镜像目标。真实序列号、真实标定标识和本机覆盖仍必须置于被 Git 忽略的 `localstore/` 配置文件。
 
+## 相机选择段
+
+可选根对象 `camera_selection` 管理一个逻辑预览管线下的物理相机发现和选择。版本化模板固定为关闭；要启用必须复制配置到 `localstore/`，并同时满足 `web.bind_host: "127.0.0.1"`。支持字段如下：
+
+- `enabled`：严格布尔值，默认 `false`。关闭时仍可读取发现列表，但不能切换设备；
+- `selected_device_id`：后端适配器生成的不透明设备标识，由成功切换自动写回；不要手工填写厂商序列号；
+- `calibration_ids`：可选的设备标识到标定 ID 映射。没有映射的设备可用于预览和 2D 分析，但必须视为未标定。
+
+选择接口只接受刚刚由当前适配器枚举到的设备标识。切换期间复用同一逻辑 `camera_id`、采集循环、JPEG 缓存和 MJPEG URL；服务在新设备打开、参数恢复及本机配置持久化全部成功后才提交，并在失败时尝试恢复旧设备。选择状态只允许写入显式启动且规范化真实路径仍位于 `localstore/` 的 JSON，`..` 或符号链接不能将写入重定向到 `configs/` 模板。
+
 ## 网页预览 Plugin
 
 网页预览只读取 `components.plugins.preview` 中已注册的稳定 Plugin 标识，不接受浏览器提供的 Python 模块名。当前注册表只包含 `visual-pose-analysis`；它只消费采集循环发布的帧事件，组合姿态追踪与成像分析缓存，并不导入相机 SDK、不持有相机/夹爪/JAKA 适配器，也不能发起人工控制或运动指令。后续新增 Plugin 必须先在服务端以固定工厂注册，不能仅通过配置或网页请求引入。

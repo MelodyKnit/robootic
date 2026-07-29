@@ -20,6 +20,7 @@ from gripper_ai_controller.bootstrap.pose_settings import (
 )
 from gripper_ai_controller.adapters.jaka import JakaAdapter, JakaDryRunRobotAdapter
 from gripper_ai_controller.configuration import (
+    CameraSelectionSettings,
     GripperControlSettings,
     JakaControlSettings,
     PoseTrackingSettings,
@@ -46,6 +47,9 @@ class VisionPreviewConfig:
     preview_plugin_names: Tuple[str, ...] = ("visual-pose-analysis",)
     pose_settings: PoseTrackingSettings = field(default_factory=PoseTrackingSettings)
     vision_analysis_settings: VisionAnalysisSettings = field(default_factory=VisionAnalysisSettings)
+    camera_selection_settings: CameraSelectionSettings = field(
+        default_factory=CameraSelectionSettings
+    )
     gripper: Optional[OperatorControllableGripper] = None
     gripper_control_settings: Optional[GripperControlSettings] = None
     jaka: Optional[Union[JakaAdapter, JakaDryRunRobotAdapter]] = None
@@ -76,11 +80,30 @@ def load_vision_preview_config(config_file: str) -> VisionPreviewConfig:
     camera_id = required_string(camera, "camera_id")
     vision_name = required_string(components, "vision")
     vision_adapter_settings = optional_mapping(components, "vision_adapter_settings")
+    camera_selection_settings = _build_camera_selection_settings(
+        optional_mapping(payload, "camera_selection")
+    )
+    effective_vision_adapter_settings = dict(vision_adapter_settings)
+    if (
+        vision_name == "hikvision-camera"
+        and camera_selection_settings.selected_device_id is not None
+    ):
+        effective_vision_adapter_settings["selected_device_id"] = (
+            camera_selection_settings.selected_device_id
+        )
+    if vision_name == "hikvision-camera" and camera_selection_settings.calibration_ids:
+        effective_vision_adapter_settings["device_calibration_ids"] = dict(
+            camera_selection_settings.calibration_ids
+        )
     preview_plugin_names = _build_preview_plugin_names(optional_mapping(components, "plugins"))
     camera_parameter_overrides = validate_camera_parameter_overrides(
         payload.get("camera_parameters", {})
     )
     web_settings = _build_web_settings(optional_mapping(payload, "web"), runtime_mode)
+    if camera_selection_settings.enabled and web_settings.bind_host != "127.0.0.1":
+        raise ValueError(
+            "camera_selection.enabled requires web.bind_host to be 127.0.0.1."
+        )
     gripper = None
     gripper_control_settings = None
     if "gripper_control" in payload:
@@ -105,7 +128,7 @@ def load_vision_preview_config(config_file: str) -> VisionPreviewConfig:
             VISION_ADAPTERS,
             vision_name,
             "vision adapter",
-            vision_adapter_settings,
+            effective_vision_adapter_settings,
         ),
         settings=web_settings,
         camera_parameter_overrides=camera_parameter_overrides,
@@ -118,6 +141,7 @@ def load_vision_preview_config(config_file: str) -> VisionPreviewConfig:
         vision_analysis_settings=_build_vision_analysis_settings(
             optional_mapping(payload, "vision_analysis")
         ),
+        camera_selection_settings=camera_selection_settings,
         gripper=gripper,
         gripper_control_settings=gripper_control_settings,
         jaka=jaka,
@@ -184,6 +208,48 @@ def _build_web_settings(settings, runtime_mode=RuntimeMode.PRODUCTION):
         gripper_controls_enabled=gripper_controls_enabled,
         jaka_controls_enabled=jaka_controls_enabled,
         plugin_reload_enabled=plugin_reload_enabled,
+    )
+
+
+def _build_camera_selection_settings(settings: Dict[str, Any]) -> CameraSelectionSettings:
+    """Validate local camera-selection policy without accepting vendor serial numbers."""
+
+    allowed = {"enabled", "selected_device_id", "calibration_ids"}
+    unknown = set(settings).difference(allowed)
+    if unknown:
+        raise ValueError(
+            "Unsupported camera_selection settings: {0}.".format(
+                ", ".join(sorted(unknown))
+            )
+        )
+    enabled = settings.get("enabled", False)
+    if type(enabled) is not bool:
+        raise ValueError("camera_selection.enabled must be a boolean.")
+    selected_device_id = settings.get("selected_device_id")
+    if selected_device_id is not None and (
+        not isinstance(selected_device_id, str) or not selected_device_id.strip()
+    ):
+        raise ValueError(
+            "camera_selection.selected_device_id must be a non-empty string when present."
+        )
+    calibration_ids = settings.get("calibration_ids", {})
+    if not isinstance(calibration_ids, dict):
+        raise ValueError("camera_selection.calibration_ids must be a JSON object.")
+    normalized_calibrations = {}
+    for device_id, calibration_id in calibration_ids.items():
+        if not isinstance(device_id, str) or not device_id.strip():
+            raise ValueError(
+                "Every camera_selection.calibration_ids key must be a non-empty string."
+            )
+        if not isinstance(calibration_id, str) or not calibration_id.strip():
+            raise ValueError(
+                "Every camera_selection.calibration_ids value must be a non-empty string."
+            )
+        normalized_calibrations[device_id] = calibration_id
+    return CameraSelectionSettings(
+        enabled=enabled,
+        selected_device_id=selected_device_id,
+        calibration_ids=normalized_calibrations,
     )
 
 

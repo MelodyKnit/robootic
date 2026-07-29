@@ -280,6 +280,70 @@ class VisionAnalysisServiceTests(unittest.TestCase):
 
         self.run_async(scenario())
 
+    def test_analysis_reset_discards_old_quality_and_reuses_the_worker(self):
+        """A camera switch clears diagnostics after draining the one active inspection."""
+
+        class BlockingInspector:
+            """Block only the first inspection to expose reset and pending-frame behavior."""
+
+            def __init__(self):
+                self.started = threading.Event()
+                self.release = threading.Event()
+                self.calls = []
+                self.delegate = FrameQualityInspector(make_analysis_settings())
+
+            def inspect(self, frame):
+                self.calls.append(frame.captured_at)
+                if len(self.calls) == 1:
+                    self.started.set()
+                    self.release.wait(timeout=2.0)
+                return self.delegate.inspect(frame)
+
+        async def scenario():
+            service = VisionAnalysisService(
+                "camera-a",
+                make_analysis_settings(max_analysis_fps=100),
+                PoseTrackingSettings(),
+                None,
+            )
+            inspector = BlockingInspector()
+            service._inspector = inspector
+            original_executor = service._analysis_executor
+            reset_task = None
+            try:
+                await service.record_frame(make_mono_frame(captured_at=1.0))
+                await self.wait_for(inspector.started.is_set)
+                await service.record_frame(make_mono_frame(captured_at=2.0))
+
+                reset_task = asyncio.create_task(service.reset_frame_state())
+                await self.wait_for(lambda: service._resetting_frame_state)
+                await service.record_frame(make_mono_frame(captured_at=3.0))
+                self.assertFalse(reset_task.done())
+
+                inspector.release.set()
+                await reset_task
+                snapshot = await service.snapshot()
+                self.assertIsNone(snapshot.frame_captured_at)
+                self.assertIsNone(snapshot.frame)
+                self.assertEqual((), snapshot.persons)
+                self.assertEqual([1.0], inspector.calls)
+                self.assertIs(original_executor, service._analysis_executor)
+                self.assertFalse(service._executor_shutdown)
+
+                await service.record_frame(make_mono_frame(captured_at=4.0))
+                await self.wait_for(lambda: 4.0 in service._qualities)
+                snapshot = await service.snapshot()
+                self.assertEqual(4.0, snapshot.frame_captured_at)
+                self.assertIsNotNone(snapshot.frame)
+                self.assertEqual([1.0, 4.0], inspector.calls)
+            finally:
+                inspector.release.set()
+                if reset_task is not None and not reset_task.done():
+                    await reset_task
+                await service.shutdown()
+
+        self.run_async(scenario())
+
     def test_quality_worker_honors_configured_analysis_rate(self):
         """The worker delays a newer quality measurement until its rate window opens."""
 

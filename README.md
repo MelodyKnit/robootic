@@ -15,10 +15,12 @@
 
 ### 基础环境要求
 * **Python 隔离环境**：Conda 环境 `robotic`（包含 `Python >=3.7,<3.8`，64位）
-* **包管理器**：Poetry 1.8.5（需确保 `virtualenv` 固定为 `20.26.6`，`packaging` 固定为 `23.2`，以规避 Python 3.7 兼容性解析错误）。**切勿使用 Poetry 2.x 进行锁定。**
+* **包管理器**：执行入口支持 Poetry `>=1.7,<3`。Poetry 1.7/1.8 可安装、构建、检查和启动项目；Poetry 2.x 可检查并启动已经由 Poetry 1.x 建立的 Python 3.7 环境。为维持旧版可读取的锁格式，统一使用 Poetry 1.8.5 更新 `poetry.lock`。
 * **图像与服务依赖**：`pyzmq==25.1.2`、`cbor==1.0.0`、`FastAPI==0.99.1`、`uvicorn==0.22.0`、`Pillow==9.5.0`
 * **姿态学习依赖**：`torch==1.13.1` 与 `torchvision==0.14.1`（固定锁定 PyTorch CUDA 11.7 软件源包）
 * **Web 前端环境**：Node.js 20+ 以及 pnpm 10
+
+Poetry CLI 自身应通过 `pipx` 或官方安装器运行在它支持的宿主 Python 中，不要安装到 `robotic` 的 Python 3.7 环境。激活 `robotic` 后使用 Poetry 1.7/1.8 执行 `poetry env use python` 和首次安装，让项目虚拟环境使用当前 Python 3.7；项目构建后端固定为仍兼容 Python 3.7 的 `poetry-core==1.6.1`。当前 Poetry 2.3 的解释器探测代码要求 Python 3.8+ 语法，因此不能用于首次创建或构建本项目的 Python 3.7 环境，但可通过 `run.bat` 和 `test.bat` 使用已经建立的环境。
 
 ### 官方 SDK 引入规范
 由于再分发授权约束，各硬件厂商 SDK 的物理资产不打包随 Git 提交。部署真机前，需从静态资料库 [documents/](../../documents) 将相应依赖复制到子项目的适配器目录中（**严禁跨目录直接在代码中引用外部共享库**）：
@@ -98,6 +100,9 @@ poetry run python -m gripper_ai_controller reload --config-file configs/developm
 
 # 4. 提交代码前的绝对路径检查自律脚本
 python scripts/check_submission_paths.py
+
+# 5. 使用 Poetry 1.8.5 安全刷新兼容锁文件
+.\scripts\lock.bat
 ```
 
 ### 3.4 物理通联测试（真机调试）
@@ -129,7 +134,10 @@ poetry run gripper-ai-controller web --config-file localstore/gripper-web-contro
 ### 4.1 海康相机网页自适应控制
 海康 USB 工业相机在启动时被独占拉起，以单一采集循环推送 MJPEG 服务；其各项曝光及帧率参数白名单见于 [相机说明](src/gripper_ai_controller/adapters/hikvision/README.md)。
 1. 将 `configs/hikvision-usb.example.json` 拷贝至 `localstore`。
-2. 真实设备变更的相机参数会自动由 Web 后端持续原子写回所配置的本机配置文件中。
+2. 将 `web.bind_host` 设为 `127.0.0.1`，再显式开启 `camera_selection.enabled`，页面即可刷新 USB 相机列表并选择当前采集设备。
+3. 设备选择和真实参数只写回启动时显式传入的 `localstore/` 本机配置；浏览器只获得不直接包含厂商序列号的设备标识。
+
+切换相机不会创建第二条采集链路，也不会更改逻辑 `camera_id` 或 MJPEG URL。后端会串行停止旧相机、打开新相机并恢复允许的参数；失败时尝试回滚旧设备，成功后清空旧设备的画面、骨架和成像分析缓存。未给新设备配置标定映射时仍可预览和执行 2D 分析，但不得将其视为已标定的机器人空间数据。
 
 ### 4.2 电装网页夹爪授权控制 (DH PGI)
 真实夹爪的物理参数需存放于 `localstore/gripper-web-control.local.json` 配置的 `gripper_control` 子段中：

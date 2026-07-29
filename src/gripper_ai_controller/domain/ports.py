@@ -5,6 +5,7 @@ import time
 from typing import Awaitable, Callable, Mapping, Optional, Tuple, Union
 
 from gripper_ai_controller.domain.models import (
+    CameraDeviceDescriptor,
     CommandEnvelope,
     CameraParameter,
     CameraParameterUpdateResult,
@@ -157,6 +158,30 @@ class VisionAdapter(LifecycleComponent):
     @abstractmethod
     async def capture(self) -> ImageFrame:
         """Capture one frame reference and its metadata."""
+
+
+class SelectableVisionAdapter(ABC):
+    """Optional camera capability for safe device discovery and selection.
+
+    Selection only updates adapter configuration while its lifecycle is
+    stopped. Opening, closing, or switching an active device remains owned by
+    the normal ``VisionAdapter`` startup and shutdown lifecycle.
+    """
+
+    @property
+    @abstractmethod
+    def selected_camera_device_id(self) -> Optional[str]:
+        """Return the opaque selected device ID, or ``None`` when unconfigured."""
+
+    @abstractmethod
+    async def list_camera_devices(self) -> Tuple[CameraDeviceDescriptor, ...]:
+        """Discover camera devices without opening them for acquisition."""
+
+    @abstractmethod
+    async def configure_camera_device(
+        self, device_id: Optional[str]
+    ) -> Optional[CameraDeviceDescriptor]:
+        """Select one device, or restore automatic selection, while stopped."""
 
 
 class CameraParameterError(ValueError):

@@ -1,16 +1,25 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-import type { CameraState, CameraStatus } from '../api/camera'
+import type { CameraDevice, CameraError, CameraState, CameraStatus } from '../api/camera'
 import CameraParameterPanel from './CameraParameterPanel.vue'
+import CameraSelector from './CameraSelector.vue'
 
 const props = defineProps<{
   camera: CameraStatus | null
+  devices: CameraDevice[]
+  discoveryError: CameraError | null
   isLoading: boolean
+  isSelecting: boolean
+  selectedDeviceId: string | null
+  selectionEnabled: boolean
+  sourceRevision: number
 }>()
 
 const emit = defineEmits<{
   reconnect: []
+  refreshCameras: []
+  selectDevice: [deviceId: string]
 }>()
 
 const stateLabels: Record<CameraState, string> = {
@@ -44,12 +53,23 @@ function requestReconnect(): void {
       <button
         class="shrink-0 rounded border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-[11px] font-semibold text-slate-200 transition hover:border-slate-600 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-45"
         type="button"
-        :disabled="isLoading"
+        :disabled="isLoading || isSelecting"
         @click="requestReconnect"
       >
         重新连接
       </button>
     </div>
+
+    <CameraSelector
+      :devices="devices"
+      :selected-device-id="selectedDeviceId"
+      :selection-enabled="selectionEnabled"
+      :discovery-error="discoveryError"
+      :is-loading="isLoading"
+      :is-selecting="isSelecting"
+      @refresh="emit('refreshCameras')"
+      @select="emit('selectDevice', $event)"
+    />
 
     <dl class="grid grid-cols-2 gap-x-3 gap-y-2 border-y border-slate-800 px-4 py-3 text-[11px]">
       <div>
@@ -69,6 +89,9 @@ function requestReconnect(): void {
     <p v-if="camera?.error" class="mx-4 mt-3 rounded border border-rose-900/50 bg-rose-950/20 px-3 py-2 text-xs text-rose-300" role="alert">
       {{ camera.error.message }}
     </p>
-    <CameraParameterPanel :camera-id="camera?.cameraId ?? null" />
+    <CameraParameterPanel
+      :key="`${camera?.cameraId ?? 'none'}:${sourceRevision}`"
+      :camera-id="camera?.cameraId ?? null"
+    />
   </section>
 </template>

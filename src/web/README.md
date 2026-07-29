@@ -5,7 +5,8 @@
 ## 结构
 
 - `src/api/camera.ts`：相机、参数、姿态和成像分析 HTTP 契约校验。
-- `src/composables/useCameraPreview.ts`：相机状态轮询与 MJPEG 重连。
+- `src/composables/useCameraPreview.ts`：物理相机目录、选择状态、逻辑相机状态轮询与 MJPEG 重连。
+- `src/components/CameraSelector.vue`：在相机 Adapter 面板中刷新并选择后端发现的采集设备。
 - `src/composables/usePoseTracking.ts`：姿态快照轮询与目标关节选择。
 - `src/composables/useVisionAnalysis.ts`：只读成像质量与人员识别缓存轮询。
 - `src/components/PoseSkeletonOverlay.vue`：按照图片实际显示尺寸绘制人体框、骨架和锁定关节的 Canvas 覆盖层。
@@ -19,6 +20,8 @@
 - `src/components/RobotControlPanel.vue`：J1 至 J6 只读角度、绝对目标草稿、伺服使能和两阶段关节运动确认界面。
 
 骨架坐标由后端以相对于原始帧宽高的归一化数值提供。Canvas 会按连续 MJPEG 在 `object-contain` 盒内实际可见的像素矩形绘制，因此黑边、窗口缩放或相机画面比例变化都不会把骨架投射到图像外。只有 `/pose` 的 `overlay_fresh` 为真时才绘制，过期时隐藏叠加但视频不中断。`/pose/frame` 是后端诊断接口，不参与主画面切换。
+
+相机 Adapter 面板调用 `GET /api/cameras` 获取物理设备目录，选择时调用 `PUT /api/cameras/{camera_id}/selection`。页面始终保留同一个逻辑相机和 MJPEG 元素；切换成功只递增数据源修订号，用于清空参数、骨架和分析面板的旧状态，不会主动重建视频地址。发现失败与切换失败分别显示，当前可用画面不因列表刷新而中断。选择开关由本机后端配置决定，前端不能自行开启。
 
 ## 开发与构建
 

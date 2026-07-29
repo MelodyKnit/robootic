@@ -1,4 +1,4 @@
-import { computed, ref, watch, type ComputedRef } from 'vue'
+import { computed, ref, watch, type ComputedRef, type Ref } from 'vue'
 
 import {
   CameraApiError,
@@ -12,7 +12,7 @@ const analysisRefreshMilliseconds = 500
  * Polls cached analysis metadata from the existing preview service. This composable
  * never opens an MJPEG stream, changes camera parameters, or triggers model inference.
  */
-export function useVisionAnalysis(cameraId: ComputedRef<string | null>) {
+export function useVisionAnalysis(cameraId: ComputedRef<string | null>, sourceRevision: Readonly<Ref<number>>) {
   const analysis = ref<VisionAnalysis | null>(null)
   const errorMessage = ref<string | null>(null)
   const analysisAvailable = computed(() => analysis.value !== null)
@@ -44,6 +44,7 @@ export function useVisionAnalysis(cameraId: ComputedRef<string | null>) {
   /** Reads one server-side cache entry then schedules the next passive refresh. */
   async function refreshNow(session: number): Promise<void> {
     const currentCameraId = cameraId.value
+    const currentSourceRevision = sourceRevision.value
     if (!active || session !== sessionVersion || currentCameraId === null) {
       scheduleRefresh(session)
       return
@@ -53,13 +54,23 @@ export function useVisionAnalysis(cameraId: ComputedRef<string | null>) {
     requestController = new AbortController()
     try {
       const nextAnalysis = await getCameraVisionAnalysis(currentCameraId, requestController.signal)
-      if (!active || session !== sessionVersion || currentCameraId !== cameraId.value) {
+      if (
+        !active ||
+        session !== sessionVersion ||
+        currentCameraId !== cameraId.value ||
+        currentSourceRevision !== sourceRevision.value
+      ) {
         return
       }
       analysis.value = nextAnalysis
       errorMessage.value = null
     } catch (error) {
-      if (!isAbortError(error) && active && session === sessionVersion) {
+      if (
+        !isAbortError(error) &&
+        active &&
+        session === sessionVersion &&
+        currentSourceRevision === sourceRevision.value
+      ) {
         errorMessage.value = displayAnalysisError(error)
       }
     } finally {
@@ -81,7 +92,7 @@ export function useVisionAnalysis(cameraId: ComputedRef<string | null>) {
     }, analysisRefreshMilliseconds)
   }
 
-  watch(cameraId, () => {
+  watch([cameraId, sourceRevision], () => {
     analysis.value = null
     errorMessage.value = null
     if (active) {

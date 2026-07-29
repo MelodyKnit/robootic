@@ -1,5 +1,6 @@
 """Synchronous MVS USB camera boundary used only by the Hikvision adapter."""
 
+import hashlib
 import importlib
 import os
 from ctypes import POINTER, byref, c_bool, c_ubyte, cast, memset, sizeof, string_at
@@ -86,6 +87,7 @@ class MvsUsbCameraClient:
         self._handle_created = False
         self._opened = False
         self._grabbing = False
+        self._selected_device_id = None  # type: Optional[str]
         self._frame_delivery_mode = frame_delivery_mode
 
     @property
@@ -94,8 +96,26 @@ class MvsUsbCameraClient:
 
         return self._frame_delivery_mode
 
+    @property
+    def selected_device_id(self) -> Optional[str]:
+        """Return the opaque ID of the currently open device, when available."""
+
+        return self._selected_device_id
+
     def open_camera(self, camera_serial: Optional[str]) -> None:
         """Open one locally selected USB camera without changing camera parameters."""
+
+        self._open_camera(camera_serial=camera_serial, device_id=None)
+
+    def open_camera_device(self, device_id: str) -> None:
+        """Open one USB camera selected by an adapter-owned opaque device ID."""
+
+        if not device_id:
+            raise MvsCameraClientError("The MVS USB camera device ID must be non-empty.")
+        self._open_camera(camera_serial=None, device_id=device_id)
+
+    def _open_camera(self, camera_serial: Optional[str], device_id: Optional[str]) -> None:
+        """Initialize MVS and open one device through exactly one selection mechanism."""
 
         if self._opened:
             return
@@ -103,7 +123,12 @@ class MvsUsbCameraClient:
         self._require_success("MV_CC_Initialize", self._sdk.MvCamera.MV_CC_Initialize())
         self._initialized = True
         try:
-            selected_device = self.select_device(self.enumerate_usb_devices(), camera_serial)
+            devices = self.enumerate_usb_devices()
+            selected_device = (
+                self.select_device_by_id(devices, device_id)
+                if device_id is not None
+                else self.select_device(devices, camera_serial)
+            )
             self._camera = self._sdk.MvCamera()
             self._require_success(
                 "MV_CC_CreateHandleWithoutLog",
@@ -115,9 +140,33 @@ class MvsUsbCameraClient:
                 self._camera.MV_CC_OpenDevice(self._sdk.MV_ACCESS_Exclusive, 0),
             )
             self._opened = True
+            self._selected_device_id = self.camera_device_id(selected_device.serial_number)
         except Exception:
             self.close_camera()
             raise
+
+    def discover_usb_devices(self) -> Sequence[MvsUsbDevice]:
+        """Enumerate USB cameras without opening one or leaking an SDK session.
+
+        An already initialized client reuses its active SDK session. A stopped
+        client owns a temporary Initialize/Finalize pair so discovery remains a
+        read-only operation with deterministic native-resource cleanup.
+        """
+
+        if self._initialized:
+            return self.enumerate_usb_devices()
+        self._load_sdk()
+        self._require_success("MV_CC_Initialize", self._sdk.MvCamera.MV_CC_Initialize())
+        self._initialized = True
+        try:
+            devices = self.enumerate_usb_devices()
+        finally:
+            try:
+                finalize_result = self._sdk.MvCamera.MV_CC_Finalize()
+                self._require_success("MV_CC_Finalize", finalize_result)
+            finally:
+                self._initialized = False
+        return devices
 
     def enumerate_usb_devices(self) -> Sequence[MvsUsbDevice]:
         """Return the currently enumerated MVS USB devices without opening them."""
@@ -155,6 +204,28 @@ class MvsUsbCameraClient:
                 "MVS USB camera selection requires a local serial number unless exactly one device is present."
             )
         return devices[0]
+
+    @classmethod
+    def select_device_by_id(
+        cls, devices: Sequence[MvsUsbDevice], device_id: str
+    ) -> MvsUsbDevice:
+        """Select one enumerated camera without accepting a raw serial from callers."""
+
+        for device in devices:
+            if cls.camera_device_id(device.serial_number) == device_id:
+                return device
+        raise MvsCameraClientError("The selected MVS USB camera was not found.")
+
+    @staticmethod
+    def camera_device_id(serial_number: str) -> str:
+        """Derive a stable opaque identifier without exposing the vendor serial."""
+
+        if not isinstance(serial_number, str) or not serial_number:
+            raise MvsCameraClientError("An MVS USB camera must report a non-empty serial number.")
+        digest = hashlib.sha256(
+            "gripper-ai-controller:hikvision-usb:{0}".format(serial_number).encode("utf-8")
+        ).hexdigest()
+        return "hikvision-usb-{0}".format(digest[:20])
 
     def capture_frame(self, timeout_ms: int) -> MvsCapturedFrame:
         """Acquire and normalize one frame before always releasing the SDK buffer.
@@ -430,6 +501,7 @@ class MvsUsbCameraClient:
             failures.append(("MV_CC_DestroyHandle", self._camera.MV_CC_DestroyHandle()))
             self._handle_created = False
         self._camera = None
+        self._selected_device_id = None
         if self._sdk is not None and self._initialized:
             failures.append(("MV_CC_Finalize", self._sdk.MvCamera.MV_CC_Finalize()))
             self._initialized = False

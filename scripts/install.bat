@@ -3,10 +3,16 @@ setlocal EnableExtensions DisableDelayedExpansion
 
 call :require_execution_directory
 if errorlevel 1 exit /b %ERRORLEVEL%
-call :require_poetry_185
+call scripts\check_poetry.bat
 if errorlevel 1 exit /b %ERRORLEVEL%
+poetry --version | findstr /R /C:"Poetry (version 2\." >nul
+if not errorlevel 1 (
+    echo [ERROR] Poetry 2.x cannot reliably bootstrap this Python 3.7 project.
+    echo [ERROR] Use Poetry 1.7 or 1.8 for installation; Poetry 2.x remains supported for run and test.
+    exit /b 1
+)
 
-echo [INFO] Installing project dependencies with Poetry 1.8.5...
+echo [INFO] Installing project dependencies with Poetry...
 if "%~1"=="" (
     poetry install
 ) else (
@@ -31,19 +37,6 @@ if not exist "pyproject.toml" (
 )
 if not exist "scripts\README.md" (
     call :fail 6ZSZ6K+v77ya5b2T5YmN55uu5b2V5LiN5piv5a6M5pW055qEIGdyaXBwZXItYWktY29udHJvbGxlciDpobnnm67moLnnm67lvZXjgII
-    exit /b 1
-)
-exit /b 0
-
-:require_poetry_185
-where poetry >nul 2>nul
-if errorlevel 1 (
-    call :fail 6ZSZ6K+v77ya5pyq5om+5YiwIFBvZXRyeeOAgumhueebruimgeaxgiBQb2V0cnkgMS44LjXjgII
-    exit /b 1
-)
-poetry --version | findstr /C:"Poetry (version 1.8.5)" >nul
-if errorlevel 1 (
-    call :fail 6ZSZ6K+v77ya5b2T5YmNIFBvZXRyeSDniYjmnKzkuI3lj5fmlK/mjIHjgILpobnnm67opoHmsYIgUG9ldHJ5IDEuOC4177yM5LiN6IO95L2/55SoIFBvZXRyeSAyLngg6K+75YaZIHBvZXRyeS5sb2Nr44CC
     exit /b 1
 )
 exit /b 0

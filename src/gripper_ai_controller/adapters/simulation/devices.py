@@ -2,10 +2,11 @@
 
 import time
 from dataclasses import replace
-from typing import Mapping, Tuple
+from typing import Mapping, Optional, Tuple
 
 from gripper_ai_controller.adapters.base import BaseAdapter, FrameDispatchingVisionAdapter
 from gripper_ai_controller.domain.models import (
+    CameraDeviceDescriptor,
     CameraParameter,
     CameraParameterApplyMode,
     CameraParameterKind,
@@ -26,6 +27,7 @@ from gripper_ai_controller.domain.ports import (
     CameraParameterError,
     OperatorControllableGripper,
     RobotAdapter,
+    SelectableVisionAdapter,
 )
 
 
@@ -194,14 +196,24 @@ class SimulatedGripperAdapter(BaseAdapter, OperatorControllableGripper):
         self.status = status
 
 
-class SimulatedCameraAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapter):
+class SimulatedCameraAdapter(
+    FrameDispatchingVisionAdapter,
+    CameraParameterAdapter,
+    SelectableVisionAdapter,
+):
     """A healthy synthetic camera with deterministic browser-control parameter behavior."""
 
     manifest = ComponentManifest(
         "simulated-camera",
         "0.1.0",
         "vision",
-        ("vision", "frame-source", "camera-parameters"),
+        (
+            "vision",
+            "frame-source",
+            "camera-parameters",
+            "camera-discovery",
+            "camera-selection",
+        ),
         "SimulatedCameraAdapter",
     )
 
@@ -215,6 +227,7 @@ class SimulatedCameraAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapt
         self.height = 240
         self.pixel_payload = self._build_pixel_payload()
         self.mono_pixel_payload = self._build_mono_pixel_payload()
+        self._selected_camera_device_id = "sim-camera"
         self._parameter_values = {
             "exposure_auto": "Off",
             "exposure_time_us": 8000.0,
@@ -224,6 +237,43 @@ class SimulatedCameraAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapt
             "frame_rate_fps": 30.0,
             "pixel_format": "RGB8",
         }
+
+    @property
+    def selected_camera_device_id(self) -> Optional[str]:
+        """Return the stable identifier of the synthetic camera selection."""
+
+        return self._selected_camera_device_id
+
+    async def list_camera_devices(self) -> Tuple[CameraDeviceDescriptor, ...]:
+        """Return the single deterministic simulated camera without external I/O."""
+
+        return (
+            CameraDeviceDescriptor(
+                device_id="sim-camera",
+                display_name="模拟相机",
+                model_name="Deterministic simulated camera",
+                transport="simulation",
+                selected=self._selected_camera_device_id == "sim-camera",
+                calibrated=True,
+            ),
+        )
+
+    async def configure_camera_device(
+        self, device_id: Optional[str]
+    ) -> Optional[CameraDeviceDescriptor]:
+        """Select or clear the fixed simulated device only while stopped."""
+
+        if self.started:
+            raise RuntimeError(
+                "The simulated camera adapter must be stopped before selection changes."
+            )
+        if device_id is None:
+            self._selected_camera_device_id = None
+            return None
+        if device_id != "sim-camera":
+            raise ValueError("The requested simulated camera device is unavailable.")
+        self._selected_camera_device_id = "sim-camera"
+        return (await self.list_camera_devices())[0]
 
     async def capture(self) -> ImageFrame:
         """Emit one synthetic RGB frame and notify observers without opening a device."""

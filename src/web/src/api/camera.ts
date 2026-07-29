@@ -20,6 +20,25 @@ export interface CameraStatus {
   error: CameraError | null
 }
 
+/** One physical device discovered behind a configured logical camera adapter. */
+export interface CameraDevice {
+  deviceId: string
+  displayName: string
+  modelName: string
+  transport: string
+  selected: boolean
+  calibrated: boolean
+}
+
+/** Camera discovery and selection state returned as one consistent snapshot. */
+export interface CameraCatalog {
+  cameras: CameraStatus[]
+  devices: CameraDevice[]
+  selectedDeviceId: string | null
+  selectionEnabled: boolean
+  discoveryError: CameraError | null
+}
+
 export interface CameraParameter {
   key: string
   kind: CameraParameterKind
@@ -140,10 +159,6 @@ export interface VisionAnalysis {
   visibleJointNames: string[]
 }
 
-interface CameraListResponse {
-  cameras: CameraStatus[]
-}
-
 interface ApiErrorResponse {
   code?: unknown
   message?: unknown
@@ -209,6 +224,104 @@ function parseCameraStatus(payload: unknown): CameraStatus {
     state: value.state as CameraState,
     latestFrameAt: value.latest_frame_at as number | null,
     error: value.error as CameraError | null,
+  }
+}
+
+/** Converts one backend-owned device descriptor without exposing SDK objects. */
+function parseCameraDevice(payload: unknown): CameraDevice {
+  if (typeof payload !== 'object' || payload === null) {
+    throw new CameraApiError(502, 'invalid_response', '相机设备条目无效。')
+  }
+
+  const value = payload as Record<string, unknown>
+  if (
+    typeof value.device_id !== 'string' ||
+    typeof value.display_name !== 'string' ||
+    typeof value.model_name !== 'string' ||
+    typeof value.transport !== 'string' ||
+    typeof value.selected !== 'boolean' ||
+    typeof value.calibrated !== 'boolean'
+  ) {
+    throw new CameraApiError(502, 'invalid_response', '相机设备条目不完整。')
+  }
+
+  return {
+    deviceId: value.device_id,
+    displayName: value.display_name,
+    modelName: value.model_name,
+    transport: value.transport,
+    selected: value.selected,
+    calibrated: value.calibrated,
+  }
+}
+
+/** Parses one atomic discovery snapshot shared by listing and selection responses. */
+function parseCameraCatalog(payload: unknown): CameraCatalog {
+  if (typeof payload !== 'object' || payload === null) {
+    throw new CameraApiError(502, 'invalid_response', '相机列表响应无效。')
+  }
+
+  const value = payload as Record<string, unknown>
+  if (!Array.isArray(value.cameras)) {
+    throw new CameraApiError(502, 'invalid_response', '相机列表响应不完整。')
+  }
+
+  const catalogFields = [
+    'devices',
+    'selected_device_id',
+    'selection_enabled',
+    'discovery_error',
+  ]
+  const catalogFieldCount = catalogFields.filter((field) => field in value).length
+  if (catalogFieldCount === 0) {
+    return {
+      cameras: value.cameras.map(parseCameraStatus),
+      devices: [],
+      selectedDeviceId: null,
+      selectionEnabled: false,
+      discoveryError: null,
+    }
+  }
+
+  if (
+    !Array.isArray(value.devices) ||
+    !(value.selected_device_id === null || typeof value.selected_device_id === 'string') ||
+    typeof value.selection_enabled !== 'boolean' ||
+    !isNullableCameraError(value.discovery_error)
+  ) {
+    throw new CameraApiError(502, 'invalid_response', '相机列表响应不完整。')
+  }
+
+  const cameras = value.cameras.map(parseCameraStatus)
+  const devices = value.devices.map(parseCameraDevice)
+  const selectedDeviceId = value.selected_device_id as string | null
+  const discoveryError = value.discovery_error as CameraError | null
+  const selectedDevices = devices.filter((device) => device.selected)
+  const selectedDescriptor = devices.find((device) => device.deviceId === selectedDeviceId)
+  if (selectedDevices.length > 1) {
+    throw new CameraApiError(502, 'invalid_response', '相机列表包含多个已选设备。')
+  }
+  if (selectedDeviceId === null && selectedDevices.length !== 0) {
+    throw new CameraApiError(502, 'invalid_response', '相机列表的选择状态不一致。')
+  }
+  if (selectedDeviceId !== null) {
+    if (selectedDescriptor !== undefined && !selectedDescriptor.selected) {
+      throw new CameraApiError(502, 'invalid_response', '相机列表的选择状态不一致。')
+    }
+    if (selectedDevices.some((device) => device.deviceId !== selectedDeviceId)) {
+      throw new CameraApiError(502, 'invalid_response', '相机列表的选择状态不一致。')
+    }
+    if (selectedDescriptor === undefined && discoveryError === null) {
+      throw new CameraApiError(502, 'invalid_response', '相机列表中的已选设备不存在。')
+    }
+  }
+
+  return {
+    cameras,
+    devices,
+    selectedDeviceId,
+    selectionEnabled: value.selection_enabled,
+    discoveryError,
   }
 }
 
@@ -692,14 +805,23 @@ async function requestJson(path: string, options: JsonRequestOptions = {}): Prom
   throw new CameraApiError(response.status, code, message)
 }
 
-/** Fetches all configured cameras before the page selects its only preview target. */
-export async function listCameras(signal?: AbortSignal): Promise<CameraStatus[]> {
+/** Fetches configured logical cameras and their backend-discovered physical devices. */
+export async function listCameras(signal?: AbortSignal): Promise<CameraCatalog> {
   const payload = await requestJson('/api/cameras', { signal })
-  if (typeof payload !== 'object' || payload === null || !Array.isArray((payload as CameraListResponse).cameras)) {
-    throw new CameraApiError(502, 'invalid_response', '相机列表响应无效。')
-  }
+  return parseCameraCatalog(payload)
+}
 
-  return (payload as CameraListResponse).cameras.map(parseCameraStatus)
+/** Selects one discovered physical source for a configured logical camera. */
+export async function selectCameraDevice(
+  cameraId: string,
+  deviceId: string,
+  signal?: AbortSignal,
+): Promise<CameraCatalog> {
+  const payload = await requestJson(
+    `/api/cameras/${encodeURIComponent(cameraId)}/selection`,
+    { method: 'PUT', body: { device_id: deviceId }, signal },
+  )
+  return parseCameraCatalog(payload)
 }
 
 /** Retrieves the current state for one configured camera. */

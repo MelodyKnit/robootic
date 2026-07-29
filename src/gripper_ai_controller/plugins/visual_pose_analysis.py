@@ -89,6 +89,15 @@ class VisualPoseAnalysisPlugin(Plugin):
                 event.on_pose_inference_started,
             )
 
+    async def reset_frame_state(self) -> None:
+        """Discard frame-derived plugin state without replacing lifecycle resources."""
+
+        if not self._started or self._shutdown:
+            return
+        if self.pose_tracking_service is not None:
+            await self.pose_tracking_service.reset_frame_state()
+        await self.vision_analysis_service.reset_frame_state()
+
     async def pose_snapshot(self) -> PoseTrackingSnapshot:
         """Return cached pose metadata without starting inference or capturing a frame."""
 

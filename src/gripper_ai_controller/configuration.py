@@ -1,6 +1,6 @@
 """Configuration owned by the application rather than hardware adapters."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import math
 from typing import Any, Dict, Mapping, Optional
 
@@ -77,6 +77,22 @@ class WebPreviewSettings:
     gripper_controls_enabled: bool = False
     jaka_controls_enabled: bool = False
     plugin_reload_enabled: bool = False
+
+
+@dataclass(frozen=True)
+class CameraSelectionSettings:
+    """Validated policy and persisted state for one selectable preview camera.
+
+    Device identifiers are adapter-issued opaque values. They deliberately remain
+    separate from vendor settings such as a serial number, and callers may persist
+    them only through the explicit local configuration selected at process startup.
+    Calibration identifiers are optional per-device bindings; an unbound device may
+    still provide 2D preview frames but must not claim a valid physical calibration.
+    """
+
+    enabled: bool = False
+    selected_device_id: Optional[str] = None
+    calibration_ids: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

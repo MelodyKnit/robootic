@@ -7,12 +7,14 @@ import time
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from gripper_ai_controller.configuration import (
+    CameraSelectionSettings,
     PoseTrackingSettings,
     VisionAnalysisSettings,
     WebPreviewSettings,
 )
 from gripper_ai_controller.core.plugin_host import PluginHost, PluginHostError
 from gripper_ai_controller.domain.models import (
+    CameraDeviceDescriptor,
     CameraParameter,
     CameraParameterApplyMode,
     CameraParameterUpdateResult,
@@ -22,6 +24,7 @@ from gripper_ai_controller.domain.models import (
 from gripper_ai_controller.domain.ports import (
     CameraParameterAdapter,
     CameraParameterError,
+    SelectableVisionAdapter,
     VisionAdapter,
 )
 from gripper_ai_controller.pose.config_store import PoseTargetConfigStore, PoseTargetConfigStoreError
@@ -33,8 +36,11 @@ from gripper_ai_controller.web.codec import FrameEncodingError, JpegFrameEncoder
 from gripper_ai_controller.web.config_store import (
     CameraParameterConfigStore,
     CameraParameterConfigStoreError,
+    CameraSelectionConfigStore,
+    CameraSelectionConfigStoreError,
 )
 from gripper_ai_controller.web.models import (
+    CameraCatalogSnapshot,
     CameraPreviewError,
     CameraPreviewStatus,
     EncodedFrame,
@@ -68,6 +74,30 @@ class PoseTrackingCapabilityError(RuntimeError):
 
 class PoseTargetPersistenceError(RuntimeError):
     """Report that a valid in-memory target could not be saved to local configuration."""
+
+
+class CameraSelectionDisabledError(RuntimeError):
+    """Report a physical-camera selection blocked by local Web policy."""
+
+
+class CameraSelectionCapabilityError(RuntimeError):
+    """Report that the configured vision adapter cannot enumerate physical devices."""
+
+
+class CameraDeviceNotFoundError(RuntimeError):
+    """Report an opaque camera device identifier absent from a fresh discovery result."""
+
+
+class CameraSelectionConflictError(RuntimeError):
+    """Report a second selection request while another switch is still active."""
+
+
+class CameraSelectionOperationError(RuntimeError):
+    """Report a failed device switch after attempting to restore the previous camera."""
+
+
+class CameraSelectionPersistenceError(RuntimeError):
+    """Report a selected device that could not be saved to the explicit local config."""
 
 
 _VISUAL_POSE_PLUGIN_ID = "visual-pose-analysis"
@@ -133,6 +163,22 @@ class FrameHub:
 
         async with self._condition_for_current_loop():
             self._state = "stopped"
+            self._condition.notify_all()
+
+    async def reset_for_camera_switch(self) -> None:
+        """Discard every old-device frame before accepting the new camera source.
+
+        Existing MJPEG clients remain connected to the same hub and wait for the
+        first frame from the replacement device. Clearing the pose cache here also
+        prevents a diagnostic request from retrieving pixels captured by the former
+        physical camera after the switch has committed.
+        """
+
+        async with self._condition_for_current_loop():
+            self._latest_frame = None
+            self._pose_frames.clear()
+            self._state = "starting"
+            self._error = None
             self._condition.notify_all()
 
     async def latest_frame(self) -> Optional[EncodedFrame]:
@@ -238,6 +284,23 @@ class LatestJpegPublisher:
                 pass
         self._executor.shutdown(wait=True)
 
+    async def reset_frame_state(self) -> None:
+        """Drain the active old-device encode and discard its queued replacement.
+
+        The executor remains available for the next camera. A completed old frame may
+        briefly enter the hub while this method waits, but the caller resets the hub
+        and passive analysis only after this drain has completed.
+        """
+
+        async with self._lock_for_current_loop():
+            self._pending = None
+            task = self._task
+        if task is not None:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
     async def _encode_and_publish(self, frame: ImageFrame, retain_for_pose: bool) -> None:
         """Run bounded native JPEG work and replace queued sources after every completion."""
 
@@ -312,6 +375,8 @@ class CameraPreviewService:
         pose_target_store: Optional[PoseTargetConfigStore] = None,
         vision_analysis_service: Optional[VisionAnalysisService] = None,
         plugin_host: Optional[PluginHost] = None,
+        camera_selection_settings: Optional[CameraSelectionSettings] = None,
+        camera_selection_store: Optional[CameraSelectionConfigStore] = None,
     ) -> None:
         """Bind one configured vision adapter, settings, and optional JSON overrides.
 
@@ -333,10 +398,13 @@ class CameraPreviewService:
         self._capture_task = None  # type: Optional[asyncio.Task]
         self._operation_lock = None  # type: Optional[Any]
         self._plugin_operation_lock = None  # type: Optional[Any]
+        self._camera_selection_in_progress = False
         self._camera_parameter_overrides = dict(camera_parameter_overrides or {})
         self._parameter_store = parameter_store
         self._camera_parameter_overrides_restored = False
         self.plugin_host = plugin_host
+        self.camera_selection_settings = camera_selection_settings or CameraSelectionSettings()
+        self._camera_selection_store = camera_selection_store
         self.pose_tracking_service = pose_tracking_service
         self._pose_target_store = pose_target_store
         self.vision_analysis_service = vision_analysis_service
@@ -397,6 +465,243 @@ class CameraPreviewService:
         """Return whether this local configuration permits browser parameter writes."""
 
         return self.settings.camera_controls_enabled
+
+    @property
+    def camera_selection_enabled(self) -> bool:
+        """Return whether local policy and adapter capability permit a device switch."""
+
+        return bool(
+            self.camera_selection_settings.enabled
+            and self._camera_selection_store is not None
+            and isinstance(self.vision, SelectableVisionAdapter)
+        )
+
+    async def get_camera_catalog(self) -> CameraCatalogSnapshot:
+        """Discover selectable devices without opening another capture pipeline.
+
+        Discovery failures remain attached to the catalog so the existing active
+        preview can continue serving frames. A non-selectable adapter is represented
+        by one read-only logical device for backward-compatible browser behavior.
+        """
+
+        status = await self.hub.status()
+        adapter = self.vision
+        if not isinstance(adapter, SelectableVisionAdapter):
+            descriptor = CameraDeviceDescriptor(
+                device_id=self.camera_id,
+                display_name=self.camera_id,
+                model_name="Configured camera",
+                transport="configured",
+                selected=True,
+                calibrated=False,
+            )
+            return CameraCatalogSnapshot(
+                status,
+                (descriptor,),
+                descriptor.device_id,
+                False,
+                None,
+            )
+
+        try:
+            async with self._operation_lock_for_current_loop():
+                devices = tuple(await adapter.list_camera_devices())
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return CameraCatalogSnapshot(
+                status,
+                (),
+                adapter.selected_camera_device_id,
+                self.camera_selection_enabled,
+                CameraPreviewError(
+                    "camera_discovery_failed",
+                    "Available cameras could not be enumerated. The active preview remains unchanged.",
+                ),
+            )
+        return CameraCatalogSnapshot(
+            status,
+            devices,
+            adapter.selected_camera_device_id,
+            self.camera_selection_enabled,
+            None,
+        )
+
+    async def select_camera_device(self, device_id: str) -> CameraCatalogSnapshot:
+        """Persist and activate one freshly discovered physical camera device.
+
+        Selection is serialized with capture, parameter writes, pose-target writes,
+        and plugin reload. The old device remains authoritative until the replacement
+        opens and its configured parameters validate. Any failure attempts to restore
+        the former adapter selection before returning an error to the browser.
+        """
+
+        if not self.camera_selection_settings.enabled:
+            raise CameraSelectionDisabledError(
+                "Camera selection is disabled by the local preview configuration."
+            )
+        if self._camera_selection_store is None:
+            raise CameraSelectionDisabledError(
+                "Camera selection requires an explicit local configuration store."
+            )
+        if not isinstance(device_id, str) or not device_id.strip():
+            raise CameraDeviceNotFoundError("The requested camera device is unavailable.")
+        adapter = self.vision
+        if not isinstance(adapter, SelectableVisionAdapter):
+            raise CameraSelectionCapabilityError(
+                "The configured camera adapter does not support device selection."
+            )
+        if self._camera_selection_in_progress:
+            raise CameraSelectionConflictError("Another camera selection is already in progress.")
+
+        self._camera_selection_in_progress = True
+        try:
+            async with self._operation_lock_for_current_loop():
+                async with self._plugin_operation_lock_for_current_loop():
+                    try:
+                        devices = tuple(await adapter.list_camera_devices())
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as error:
+                        raise CameraSelectionOperationError(
+                            "Available cameras could not be enumerated."
+                        ) from error
+                    target = next(
+                        (device for device in devices if device.device_id == device_id),
+                        None,
+                    )
+                    if target is None:
+                        raise CameraDeviceNotFoundError(
+                            "The requested camera device is no longer available."
+                        )
+                    previous_device_id = adapter.selected_camera_device_id
+                    if previous_device_id == device_id:
+                        await self._persist_camera_device_selection(device_id)
+                    else:
+                        await self._switch_camera_device(
+                            adapter,
+                            previous_device_id,
+                            device_id,
+                        )
+            return await self.get_camera_catalog()
+        finally:
+            self._camera_selection_in_progress = False
+
+    async def _switch_camera_device(
+        self,
+        adapter: SelectableVisionAdapter,
+        previous_device_id: Optional[str],
+        next_device_id: str,
+    ) -> None:
+        """Replace the selected adapter source and roll back on any commit failure."""
+
+        try:
+            await self.vision.shutdown()
+            self._camera_parameter_overrides_restored = False
+            await adapter.configure_camera_device(next_device_id)
+            await self.vision.startup()
+            await self._restore_camera_parameter_overrides()
+            await self._jpeg_publisher.reset_frame_state()
+            await self._reset_passive_frame_state()
+            await self.hub.reset_for_camera_switch()
+        except asyncio.CancelledError:
+            await self._rollback_camera_device(adapter, previous_device_id)
+            raise
+        except Exception as error:
+            await self._rollback_camera_device(adapter, previous_device_id)
+            raise CameraSelectionOperationError(
+                "The selected camera could not be activated; the previous camera was restored."
+            ) from error
+
+        try:
+            await self._persist_camera_device_selection(next_device_id)
+        except CameraSelectionPersistenceError:
+            await self._rollback_camera_device(adapter, previous_device_id)
+            raise
+
+    async def _rollback_camera_device(
+        self,
+        adapter: SelectableVisionAdapter,
+        previous_device_id: Optional[str],
+    ) -> None:
+        """Restore the former adapter source without altering the persisted selection."""
+
+        try:
+            await self.vision.shutdown()
+            self._camera_parameter_overrides_restored = False
+            await adapter.configure_camera_device(previous_device_id)
+            await self.vision.startup()
+            await self._restore_camera_parameter_overrides()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            await self.hub.mark_degraded(
+                CameraPreviewError(
+                    "camera_selection_failed",
+                    "Camera switching failed and the previous camera could not be restored.",
+                )
+            )
+            raise CameraSelectionOperationError(
+                "Camera switching failed and the previous camera could not be restored."
+            ) from error
+
+    async def _persist_camera_device_selection(self, device_id: str) -> None:
+        """Save one adapter-issued opaque ID with cancellation-safe commit semantics.
+
+        A running executor write cannot be cancelled safely. If the HTTP task is
+        cancelled, this method waits for the atomic write to finish. A successful
+        write re-raises cancellation and leaves the new camera committed; a failed
+        write becomes a persistence error so the caller restores the old camera.
+        """
+
+        event_loop = asyncio.get_event_loop()
+        write_future = event_loop.run_in_executor(
+            None,
+            self._camera_selection_store.persist_selected_device_id,
+            device_id,
+        )
+        try:
+            await asyncio.shield(write_future)
+        except asyncio.CancelledError:
+            while not write_future.done():
+                try:
+                    await asyncio.shield(write_future)
+                except asyncio.CancelledError:
+                    continue
+            try:
+                write_future.result()
+            except asyncio.CancelledError as error:
+                raise CameraSelectionPersistenceError(
+                    "The selected camera could not be saved to the local configuration."
+                ) from error
+            except (CameraSelectionConfigStoreError, OSError, ValueError) as error:
+                raise CameraSelectionPersistenceError(
+                    "The selected camera could not be saved to the local configuration."
+                ) from error
+            except Exception as error:
+                raise CameraSelectionPersistenceError(
+                    "The selected camera could not be saved to the local configuration."
+                ) from error
+            raise
+        except (CameraSelectionConfigStoreError, OSError, ValueError) as error:
+            raise CameraSelectionPersistenceError(
+                "The selected camera could not be saved to the local configuration."
+            ) from error
+        except Exception as error:
+            raise CameraSelectionPersistenceError(
+                "The selected camera could not be saved to the local configuration."
+            ) from error
+
+    async def _reset_passive_frame_state(self) -> None:
+        """Clear old-device pose and image-quality state without reloading plugins."""
+
+        if self.plugin_host is not None:
+            await self.plugin_host.reset_frame_state()
+            return
+        if self.pose_tracking_service is not None:
+            await self.pose_tracking_service.reset_frame_state()
+        if self.vision_analysis_service is not None:
+            await self.vision_analysis_service.reset_frame_state()
 
     async def get_camera_parameters(self) -> Tuple[CameraParameter, ...]:
         """Return the adapter's current normalized parameter whitelist.

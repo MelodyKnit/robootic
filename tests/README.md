@@ -14,6 +14,8 @@ python -m unittest discover -s tests -v
 
 `test_hikvision_adapter.py` 只使用可注入的假 MVS 客户端，验证相机打开、单帧映射、Mono8/RGB8/Bayer 像素规范化、转换长度校验、MVS 缓冲区释放、帧观察者、缺失本机运行库的错误映射、失败健康状态、关闭清理、关闭等待正在执行的原生取帧、运行时参数范围、即时写入、暂停取流/写入/恢复取流顺序及失败后的恢复尝试。`test_vision_adapter.py` 验证实例级 `on_frame()` 装饰器注册、多相机隔离、顺序交付和同步回调拒绝。单元测试不会加载 MVS DLL、打开真实相机或采集图像。
 
+`test_camera_selection.py` 覆盖相机选择配置的旧文件兼容、回环限制、严格字段校验、`localstore/` 原子持久化和配置身份绑定，以及设备目录、成功切换、禁用、设备消失、打开失败、持久化失败回滚、请求取消后的提交一致性和旧画面/姿态缓存清理。测试只使用两设备内存适配器与临时 JSON，不会枚举或打开真实 USB 相机。前端 `camera-selection.spec.ts` 验证同一 MJPEG 元素复用、发现与切换失败保留旧画面、新源状态重置，以及旧状态和旧参数异步响应不能污染新设备界面。
+
 `test_submission_paths.py` 还验证提交前绝对路径检查的识别规则，并确认当前 Git 提交候选文件不包含文件系统绝对路径。
 
 网页 HTTP 契约测试使用 Poetry 的开发依赖 `httpx==0.24.1`，因为 FastAPI 的 `TestClient` 需要它；它不属于预览服务的运行依赖。

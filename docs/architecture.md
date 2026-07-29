@@ -32,6 +32,9 @@ flowchart LR
     Cache --> Snapshot[GET /frame]
     Cache --> Stream[GET /stream 多浏览器复用]
     Status[相机状态与重试] --> Api[GET /cameras 和 /status]
+    Discovery[SelectableVisionAdapter] --> Catalog[物理设备目录]
+    Catalog --> Selection[PUT /selection 本机策略]
+    Selection --> Camera
     Parameters[CameraParameterAdapter 固定白名单] --> Controls[参数读取与写入接口]
     Controls --> Camera
     Loop --> FrameEvent[FrameCaptured]
@@ -119,7 +122,7 @@ flowchart LR
 
 该雅可比、六轴名称和关节限位仅是离线可复现实验参数。未来真机图像伺服必须在独立规划与安全设计中引入现场相机/工具标定、真实运动学、在线图像反馈、速度和加速度限制、工作空间、碰撞和人机距离保护、目标丢失停机及显式授权；不可将当前控制台轨迹直接映射到物理关节。
 
-HTTP 接口以相机 ID 建模，首版配置只允许一个相机：`/api/cameras`、`/api/cameras/{camera_id}/status`、`/api/cameras/{camera_id}/frame`、`/api/cameras/{camera_id}/stream` 和参数子资源。`GET /parameters` 只读设备实际能力；`PATCH /parameters/{parameter_key}` 只接受 `live` 参数；`POST /parameters/apply` 只接受需要明确保存的 `restart` 参数。未知相机统一返回 `404`，首帧不可用时快照返回 `503`，所有 JSON 错误均使用 `code` 和 `message`。状态和 HTTP 头均不含帧序号。声明人工控制段后，夹爪资源位于 `/api/grippers`，JAKA 资源位于 `/api/robots`；后者以状态、短时授权、显式使能、关节预览和已确认动作建模，所有动作错误继续使用 `code` 和 `message`。静态构建前端由同一 FastAPI 进程提供，因此生产访问不需要跨域配置。
+HTTP 接口以逻辑相机 ID 建模，首版仍只有一个采集管线：`/api/cameras` 同时返回逻辑状态和当前发现的物理设备目录，`PUT /api/cameras/{camera_id}/selection` 只切换该管线的底层设备；`/status`、`/frame`、`/stream` 和参数子资源保持原 URL。选择使用 `SelectableVisionAdapter` 可选端口，必须由 `localstore/` 回环配置显式启用，设备 ID 为适配器生成的不透明值。切换与取帧、参数操作和 Plugin 状态重置串行；服务先打开新设备、恢复参数并清除旧缓存，最后以原子写入本机选择配置作为提交点。提交前失败会恢复旧设备；写入已开始时即使 HTTP 请求被取消，也会等待写入结果，避免运行设备与下次启动配置脱节。`GET /parameters` 只读设备实际能力；`PATCH /parameters/{parameter_key}` 只接受 `live` 参数；`POST /parameters/apply` 只接受需要明确保存的 `restart` 参数。未知逻辑相机和消失的物理设备分别返回 `404`，首帧不可用时快照返回 `503`，所有 JSON 错误均使用 `code` 和 `message`。状态和 HTTP 头均不含帧序号。声明人工控制段后，夹爪资源位于 `/api/grippers`，JAKA 资源位于 `/api/robots`；后者以状态、短时授权、显式使能、关节预览和已确认动作建模，所有动作错误继续使用 `code` 和 `message`。静态构建前端由同一 FastAPI 进程提供，因此生产访问不需要跨域配置。
 
 参数写入由 `web.camera_controls_enabled` 控制，默认关闭，真实开关只能置于 `localstore/` 本机配置；同一开关也阻止启动和重连期间的自动恢复写入。服务和海康适配器使用同一采集操作锁串行化取帧、节点读取、节点写入、停止取流、恢复取流和关闭。海康网页预览默认配置 `frame_delivery_mode: latest_only`，在 MVS 相机句柄打开、开始取流前设置 `MV_GrabStrategy_LatestImagesOnly`；已连接 USB 相机在开始取流后调用该 API 会返回调用顺序错误。策略设置失败会阻止该次取流并显式报错，绝不静默退回 FIFO。设备写入成功后，服务将适配器确认的本次实际值及其必要前置开关原子写回显式 `--config-file` 的根 `camera_parameters`，并在适配器启动或断连重连后的首帧前恢复；恢复失败会公开为可重试的降级状态。若设备写入成功而 JSON 写回失败，接口明确返回“设备已生效、配置未保存”的失败，不会回滚设备参数。适配器只公开固定参数白名单，不暴露厂商客户端、任意 MVS 节点、触发配置或设备持久化设置；服务不会调用 `FeatureSave` 或 `UserSetSave`。安全、可复现的仿真参数可以显式保存在受版本控制的 `configs/`，但真实相机配置与可变 `camera_parameters` 必须放在 Git 忽略的 `localstore/`。
 

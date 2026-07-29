@@ -1,29 +1,9 @@
-[project]
-name = "gripper-ai-controller"
-version = "0.1.0"
-description = "A safety-gated foundation for vision and sensor guided gripper control."
-authors = [{ name = "Robotic Project Team" }]
-readme = "README.md"
-requires-python = ">=3.7,<3.8"
-dependencies = [
-    "pyzmq==25.1.2",
-    "cbor==1.0.0",
-    "fastapi==0.99.1",
-    "uvicorn==0.22.0",
-    "Pillow==9.5.0",
-    "numpy==1.21.6",
-    "torch==1.13.1",
-    "torchvision==0.14.1",
-]
-
-[project.scripts]
-gripper-ai-controller = "gripper_ai_controller.cli:main"
-
 [tool.poetry]
 name = "gripper-ai-controller"
 version = "0.1.0"
 description = "A safety-gated foundation for vision and sensor guided gripper control."
 authors = ["Robotic Project Team"]
+readme = "README.md"
 packages = [{ include = "gripper_ai_controller", from = "src" }]
 exclude = [
     "src/gripper_ai_controller/adapters/jaka/jkrc.pyd",
@@ -44,6 +24,9 @@ numpy = "1.21.6"
 torch = { version = "1.13.1", source = "pytorch-cu117" }
 torchvision = { version = "0.14.1", source = "pytorch-cu117" }
 
+[tool.poetry.scripts]
+gripper-ai-controller = "gripper_ai_controller.cli:main"
+
 [tool.poetry.group.dev.dependencies]
 # FastAPI's TestClient uses this only in the offline HTTP contract test suite.
 httpx = "0.24.1"
@@ -55,5 +38,5 @@ url = "https://download.pytorch.org/whl/cu117"
 priority = "explicit"
 
 [build-system]
-requires = ["poetry-core>=1.0.0"]
+requires = ["poetry-core==1.6.1"]
 build-backend = "poetry.core.masonry.api"

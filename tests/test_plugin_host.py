@@ -66,6 +66,31 @@ class TargetRetainingPlugin(Plugin):
         return {"target_joint": self.target_joint}
 
 
+class ResettableBlockingPlugin(Plugin):
+    """Expose a blocking frame observer and reusable reset capability for host tests."""
+
+    manifest = ComponentManifest("resettable-plugin", "0.1.0", "plugin", ("frame-observer",))
+
+    def __init__(self, events, frame_started, frame_release):
+        self.events = events
+        self.frame_started = frame_started
+        self.frame_release = frame_release
+
+    async def startup(self):
+        self.events.append("startup")
+
+    async def shutdown(self):
+        self.events.append("shutdown")
+
+    async def handle_event(self, event):
+        self.events.append(event)
+        self.frame_started.set()
+        await self.frame_release.wait()
+
+    async def reset_frame_state(self):
+        self.events.append("reset")
+
+
 def recording_plugin_factory(events, startup_schedule=None, fail_on_event=False):
     """Build test plugins with a mutable startup schedule that survives module reload mocks."""
 
@@ -83,6 +108,12 @@ def target_retaining_plugin_factory(target_joint, created_targets):
     return TargetRetainingPlugin(target_joint, created_targets)
 
 
+def resettable_blocking_plugin_factory(events, frame_started, frame_release):
+    """Build one reset-aware observer without loading a camera or model dependency."""
+
+    return ResettableBlockingPlugin(events, frame_started, frame_release)
+
+
 class FakePoseTracker:
     """Capture plugin calls without scheduling real CUDA inference in unit tests."""
 
@@ -90,6 +121,7 @@ class FakePoseTracker:
         self.submitted_frames = []
         self.target_joints = []
         self.inference_started_callbacks = []
+        self.reset_called = False
         self.shutdown_called = False
 
     async def submit_frame(self, frame, on_inference_started=None):
@@ -106,12 +138,16 @@ class FakePoseTracker:
     async def shutdown(self):
         self.shutdown_called = True
 
+    async def reset_frame_state(self):
+        self.reset_called = True
+
 
 class FakeVisionAnalysis:
     """Capture plugin calls without reading image pixels in unit tests."""
 
     def __init__(self):
         self.recorded_frames = []
+        self.reset_called = False
         self.shutdown_called = False
 
     async def record_frame(self, frame):
@@ -119,6 +155,9 @@ class FakeVisionAnalysis:
 
     async def shutdown(self):
         self.shutdown_called = True
+
+    async def reset_frame_state(self):
+        self.reset_called = True
 
     async def snapshot(self):
         return "analysis"
@@ -212,6 +251,75 @@ class PluginHostTests(unittest.TestCase):
             self.assertTrue(frame_events)
             self.assertEqual(2.0, frame_events[-1].frame.captured_at)
             await host.shutdown()
+
+        self.run_async(scenario())
+
+    def test_frame_state_reset_drains_delivery_drops_pending_and_keeps_plugin_instance(self):
+        """Reset passive caches in place while preventing stale offered-frame delivery."""
+
+        async def scenario():
+            events = []
+            frame_started = asyncio.Event()
+            frame_release = asyncio.Event()
+            host = PluginHost(
+                (
+                    PluginFactoryDescriptor(
+                        "resettable-plugin",
+                        __name__,
+                        "resettable_blocking_plugin_factory",
+                        {
+                            "events": events,
+                            "frame_started": frame_started,
+                            "frame_release": frame_release,
+                        },
+                    ),
+                )
+            )
+            await host.startup()
+            plugin = await host.get_plugin("resettable-plugin")
+            try:
+                first = ImageFrame(
+                    "camera-a", 1.0, None, None, True, b"\x00\x00\x00", 1, 1, "rgb8"
+                )
+                pending = ImageFrame(
+                    "camera-a", 2.0, None, None, True, b"\x00\x00\x00", 1, 1, "rgb8"
+                )
+                rejected = ImageFrame(
+                    "camera-a", 3.0, None, None, True, b"\x00\x00\x00", 1, 1, "rgb8"
+                )
+                fresh = ImageFrame(
+                    "camera-a", 4.0, None, None, True, b"\x00\x00\x00", 1, 1, "rgb8"
+                )
+                self.assertTrue(host.offer_frame(first))
+                await asyncio.wait_for(frame_started.wait(), timeout=1.0)
+                self.assertTrue(host.offer_frame(pending))
+
+                reset_task = asyncio.create_task(host.reset_frame_state())
+                for _ in range(100):
+                    if host._resetting_frame_state:
+                        break
+                    await asyncio.sleep(0.001)
+                self.assertTrue(host._resetting_frame_state)
+                self.assertFalse(host.offer_frame(rejected))
+                self.assertFalse(reset_task.done())
+
+                frame_release.set()
+                await reset_task
+                frame_events = [item for item in events if isinstance(item, FrameCaptured)]
+                self.assertEqual([1.0], [item.frame.captured_at for item in frame_events])
+                self.assertIn("reset", events)
+                self.assertIs(plugin, await host.get_plugin("resettable-plugin"))
+
+                self.assertTrue(host.offer_frame(fresh))
+                for _ in range(100):
+                    frame_events = [item for item in events if isinstance(item, FrameCaptured)]
+                    if len(frame_events) == 2:
+                        break
+                    await asyncio.sleep(0.001)
+                self.assertEqual([1.0, 4.0], [item.frame.captured_at for item in frame_events])
+            finally:
+                frame_release.set()
+                await host.shutdown()
 
         self.run_async(scenario())
 
@@ -322,6 +430,21 @@ class VisualPoseAnalysisPluginTests(unittest.TestCase):
             await plugin.shutdown()
             self.assertTrue(tracker.shutdown_called)
             self.assertTrue(analysis.shutdown_called)
+
+        self.run_async(scenario())
+
+    def test_visual_plugin_forwards_frame_state_reset_to_owned_services(self):
+        """Keep camera-switch coordination at the plugin boundary without module reload."""
+
+        async def scenario():
+            tracker = FakePoseTracker()
+            analysis = FakeVisionAnalysis()
+            plugin = VisualPoseAnalysisPlugin("camera-a", tracker, analysis)
+            await plugin.startup()
+            await plugin.reset_frame_state()
+            self.assertTrue(tracker.reset_called)
+            self.assertTrue(analysis.reset_called)
+            await plugin.shutdown()
 
         self.run_async(scenario())
 

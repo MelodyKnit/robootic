@@ -20,6 +20,10 @@
       ]
     }
   },
+  "camera_selection": {
+    "enabled": false,
+    "calibration_ids": {}
+  },
   "camera_parameters": {
     "pixel_format": "RGB8"
   },

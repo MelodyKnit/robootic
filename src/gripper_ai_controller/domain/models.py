@@ -99,6 +99,23 @@ class SensorReading:
 
 
 @dataclass(frozen=True)
+class CameraDeviceDescriptor:
+    """A browser-safe description of one discoverable camera device.
+
+    ``device_id`` is an adapter-owned opaque identifier rather than a vendor
+    serial number. Device discovery must never expose native SDK structures or
+    transport credentials through this hardware-neutral contract.
+    """
+
+    device_id: str
+    display_name: str
+    model_name: str
+    transport: str
+    selected: bool
+    calibrated: bool
+
+
+@dataclass(frozen=True)
 class ImageFrame:
     """A camera frame and the metadata required to interpret its pixel payload.
 

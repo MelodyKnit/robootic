@@ -4,6 +4,7 @@ import asyncio
 import unittest
 
 from gripper_ai_controller.adapters.simulation import SimulatedCameraAdapter
+from gripper_ai_controller.domain.ports import SelectableVisionAdapter
 
 
 class VisionAdapterFrameObserverTests(unittest.TestCase):
@@ -116,6 +117,37 @@ class VisionAdapterFrameObserverTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TypeError, "async def"):
             camera.on_frame(synchronous_handler)
+
+    def test_simulated_camera_exposes_one_idempotent_selectable_device(self):
+        """Model camera discovery without adding any hardware or network side effects."""
+
+        async def scenario():
+            camera = SimulatedCameraAdapter()
+
+            self.assertIsInstance(camera, SelectableVisionAdapter)
+            devices = await camera.list_camera_devices()
+            self.assertEqual(1, len(devices))
+            self.assertEqual("sim-camera", devices[0].device_id)
+            self.assertEqual("simulation", devices[0].transport)
+            self.assertTrue(devices[0].selected)
+            self.assertTrue(devices[0].calibrated)
+
+            selected = await camera.configure_camera_device("sim-camera")
+            self.assertEqual(devices[0], selected)
+            self.assertEqual("sim-camera", camera.selected_camera_device_id)
+
+            await camera.startup()
+            with self.assertRaisesRegex(RuntimeError, "must be stopped"):
+                await camera.configure_camera_device("sim-camera")
+            await camera.shutdown()
+
+            self.assertIsNone(await camera.configure_camera_device(None))
+            self.assertIsNone(camera.selected_camera_device_id)
+            self.assertFalse((await camera.list_camera_devices())[0].selected)
+            with self.assertRaisesRegex(ValueError, "unavailable"):
+                await camera.configure_camera_device("missing-camera")
+
+        self.run_async(scenario())
 
 
 if __name__ == "__main__":

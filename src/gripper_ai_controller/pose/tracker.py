@@ -69,6 +69,8 @@ class PoseTrackingService:
         )
         self._last_inference_started_at = None  # type: Optional[float]
         self._lock = None  # type: Optional[Any]
+        self._frame_state_reset_lock = None  # type: Optional[Any]
+        self._resetting_frame_state = False
         self._stopped = False
         self._inference_snapshot = PoseInferenceSnapshot(
             camera_id,
@@ -93,9 +95,16 @@ class PoseTrackingService:
         cache capacity.
         """
 
-        if self._stopped or not self.settings.enabled or frame.camera_id != self.camera_id:
+        if (
+            self._stopped
+            or self._resetting_frame_state
+            or not self.settings.enabled
+            or frame.camera_id != self.camera_id
+        ):
             return False
         async with self._lock_for_current_loop():
+            if self._stopped or self._resetting_frame_state:
+                return False
             if self._inference_task is not None and not self._inference_task.done():
                 # Preserve only the newest source image while GPU inference is active.
                 # This bounds memory and prevents a completed result from chasing a FIFO.
@@ -154,6 +163,51 @@ class PoseTrackingService:
                 None,
             )
             return self._snapshot
+
+    async def reset_frame_state(self) -> None:
+        """Drain active inference and discard all results derived from prior frames.
+
+        Camera selection changes use this transition instead of shutting down the
+        service. The single executor remains available, while new submissions are
+        rejected until the active inference has settled and stale pose, association,
+        motion, and rate-limit state has been cleared atomically.
+        """
+
+        async with self._frame_state_reset_lock_for_current_loop():
+            async with self._lock_for_current_loop():
+                self._resetting_frame_state = True
+                self._pending_frame = None
+                task = self._inference_task
+            try:
+                if task is not None:
+                    await task
+                async with self._lock_for_current_loop():
+                    self._pending_frame = None
+                    if self._inference_task is not None and self._inference_task.done():
+                        self._inference_task = None
+                    self._last_inference_started_at = None
+                    self._reset_tracking()
+                    waiting_reason = "Pose tracking is waiting for a camera frame."
+                    self._snapshot = PoseTrackingSnapshot(
+                        self.camera_id,
+                        None,
+                        False,
+                        waiting_reason,
+                        self.settings.target_joint,
+                        None,
+                        None,
+                        None,
+                        0,
+                    )
+                    self._inference_snapshot = PoseInferenceSnapshot(
+                        self.camera_id,
+                        None,
+                        (),
+                        waiting_reason,
+                    )
+            finally:
+                async with self._lock_for_current_loop():
+                    self._resetting_frame_state = False
 
     async def shutdown(self) -> None:
         """Prevent further inference and wait for the one executor-backed task to settle."""
@@ -468,6 +522,13 @@ class PoseTrackingService:
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
+
+    def _frame_state_reset_lock_for_current_loop(self) -> Any:
+        """Serialize reusable resets without binding a lock before an event loop exists."""
+
+        if self._frame_state_reset_lock is None:
+            self._frame_state_reset_lock = asyncio.Lock()
+        return self._frame_state_reset_lock
 
     @staticmethod
     def _joint_by_name(joints: Tuple[PoseJoint2D, ...], name: str) -> Optional[PoseJoint2D]:

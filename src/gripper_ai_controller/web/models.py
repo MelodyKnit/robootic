@@ -1,8 +1,9 @@
 """In-memory contracts shared by the camera preview service and HTTP boundary."""
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
+from gripper_ai_controller.domain.models import CameraDeviceDescriptor
 from gripper_ai_controller.pose.models import PoseTrackingSnapshot
 
 
@@ -30,6 +31,17 @@ class CameraPreviewStatus:
     state: str
     latest_frame_at: Optional[float]
     error: Optional[CameraPreviewError]
+
+
+@dataclass(frozen=True)
+class CameraCatalogSnapshot:
+    """One logical preview status plus its currently discoverable physical devices."""
+
+    status: CameraPreviewStatus
+    devices: Tuple[CameraDeviceDescriptor, ...]
+    selected_device_id: Optional[str]
+    selection_enabled: bool
+    discovery_error: Optional[CameraPreviewError]
 
 
 @dataclass(frozen=True)

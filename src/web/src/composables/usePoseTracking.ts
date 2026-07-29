@@ -1,4 +1,4 @@
-import { computed, ref, watch, type ComputedRef } from 'vue'
+import { computed, ref, watch, type ComputedRef, type Ref } from 'vue'
 
 import {
   CameraApiError,
@@ -16,7 +16,7 @@ const poseRequestTimeoutMilliseconds = 1_000
  * never opens a camera stream or sends a robot command; it consumes pose metadata
  * produced by the server-side, bounded inference pipeline.
  */
-export function usePoseTracking(cameraId: ComputedRef<string | null>) {
+export function usePoseTracking(cameraId: ComputedRef<string | null>, sourceRevision: Readonly<Ref<number>>) {
   const pose = ref<PoseTracking | null>(null)
   const errorMessage = ref<string | null>(null)
   const isUpdatingTarget = ref(false)
@@ -49,6 +49,7 @@ export function usePoseTracking(cameraId: ComputedRef<string | null>) {
   /** Persists a user choice through the explicit pose-target API resource. */
   async function selectTarget(targetJoint: string): Promise<void> {
     const currentCameraId = cameraId.value
+    const currentSourceRevision = sourceRevision.value
     if (currentCameraId === null || isUpdatingTarget.value) {
       return
     }
@@ -56,12 +57,20 @@ export function usePoseTracking(cameraId: ComputedRef<string | null>) {
     isUpdatingTarget.value = true
     try {
       const nextPose = await updatePoseTarget(currentCameraId, targetJoint)
-      if (active && cameraId.value === currentCameraId) {
+      if (
+        active &&
+        cameraId.value === currentCameraId &&
+        sourceRevision.value === currentSourceRevision
+      ) {
         pose.value = nextPose
         errorMessage.value = null
       }
     } catch (error) {
-      if (active && cameraId.value === currentCameraId) {
+      if (
+        active &&
+        cameraId.value === currentCameraId &&
+        sourceRevision.value === currentSourceRevision
+      ) {
         errorMessage.value = displayPoseError(error)
       }
     } finally {
@@ -72,6 +81,7 @@ export function usePoseTracking(cameraId: ComputedRef<string | null>) {
   /** Retrieves a cached pose snapshot then schedules the next bounded poll. */
   async function refreshNow(session: number): Promise<void> {
     const currentCameraId = cameraId.value
+    const currentSourceRevision = sourceRevision.value
     if (!active || session !== sessionVersion || currentCameraId === null) {
       scheduleRefresh(session)
       return
@@ -87,13 +97,23 @@ export function usePoseTracking(cameraId: ComputedRef<string | null>) {
     }, poseRequestTimeoutMilliseconds)
     try {
       const nextPose = await getCameraPose(currentCameraId, controller.signal)
-      if (!active || session !== sessionVersion || currentCameraId !== cameraId.value) {
+      if (
+        !active ||
+        session !== sessionVersion ||
+        currentCameraId !== cameraId.value ||
+        currentSourceRevision !== sourceRevision.value
+      ) {
         return
       }
       pose.value = nextPose
       errorMessage.value = null
     } catch (error) {
-      if ((requestTimedOut || !isAbortError(error)) && active && session === sessionVersion) {
+      if (
+        (requestTimedOut || !isAbortError(error)) &&
+        active &&
+        session === sessionVersion &&
+        currentSourceRevision === sourceRevision.value
+      ) {
         if (error instanceof CameraApiError && error.code === 'pose_tracking_disabled') {
           pose.value = null
         } else {
@@ -140,7 +160,7 @@ export function usePoseTracking(cameraId: ComputedRef<string | null>) {
     }
   }
 
-  watch(cameraId, () => {
+  watch([cameraId, sourceRevision], () => {
     pose.value = null
     errorMessage.value = null
     if (active) {

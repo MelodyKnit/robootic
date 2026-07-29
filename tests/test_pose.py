@@ -361,6 +361,67 @@ class PoseFrameAndTrackingTests(unittest.TestCase):
 
         self.run_async(scenario())
 
+    def test_tracker_reset_discards_old_results_and_reuses_the_inference_worker(self):
+        """A camera switch must hide stale poses without rebuilding the model executor."""
+
+        async def scenario():
+            estimator = BlockingPoseEstimator()
+            tracker = PoseTrackingService(
+                "camera-a",
+                PoseTrackingSettings(enabled=True, max_inference_fps=30),
+                estimator,
+            )
+            original_executor = tracker._inference_executor
+            reset_task = None
+            try:
+                self.assertTrue(await tracker.submit_frame(make_frame(captured_at=1.0)))
+                for _ in range(100):
+                    if estimator.started.is_set():
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(estimator.started.is_set())
+                self.assertTrue(await tracker.submit_frame(make_frame(captured_at=2.0)))
+
+                reset_task = asyncio.create_task(tracker.reset_frame_state())
+                for _ in range(100):
+                    if tracker._resetting_frame_state:
+                        break
+                    await asyncio.sleep(0.001)
+                self.assertTrue(tracker._resetting_frame_state)
+                self.assertFalse(await tracker.submit_frame(make_frame(captured_at=3.0)))
+                self.assertFalse(reset_task.done())
+
+                estimator.release.set()
+                await reset_task
+                pose_snapshot = await tracker.snapshot()
+                inference_snapshot = await tracker.inference_snapshot()
+                self.assertIsNone(pose_snapshot.captured_at)
+                self.assertFalse(pose_snapshot.valid)
+                self.assertIsNone(pose_snapshot.person)
+                self.assertIsNone(pose_snapshot.target)
+                self.assertEqual(0, pose_snapshot.lost_frames)
+                self.assertIsNone(inference_snapshot.captured_at)
+                self.assertEqual((), inference_snapshot.candidates)
+                self.assertEqual([1.0], estimator.captured_at_values)
+                self.assertIs(original_executor, tracker._inference_executor)
+
+                self.assertTrue(await tracker.submit_frame(make_frame(captured_at=4.0)))
+                for _ in range(100):
+                    pose_snapshot = await tracker.snapshot()
+                    if pose_snapshot.captured_at == 4.0:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertEqual(4.0, pose_snapshot.captured_at)
+                self.assertTrue(pose_snapshot.valid)
+                self.assertEqual([1.0, 4.0], estimator.captured_at_values)
+            finally:
+                estimator.release.set()
+                if reset_task is not None and not reset_task.done():
+                    await reset_task
+                await tracker.shutdown()
+
+        self.run_async(scenario())
+
     def test_highest_confidence_single_person_and_target_joint_become_valid_snapshot(self):
         async def scenario():
             estimator = FakePoseEstimator(((make_candidate(person_confidence=0.8), make_candidate(person_confidence=0.95)),))

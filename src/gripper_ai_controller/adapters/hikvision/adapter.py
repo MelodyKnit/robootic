@@ -5,11 +5,16 @@ import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from gripper_ai_controller.adapters.base import FrameDispatchingVisionAdapter
-from gripper_ai_controller.adapters.hikvision.client import MvsCapturedFrame, MvsUsbCameraClient
+from gripper_ai_controller.adapters.hikvision.client import (
+    MvsCapturedFrame,
+    MvsUsbCameraClient,
+    MvsUsbDevice,
+)
 from gripper_ai_controller.domain.models import (
+    CameraDeviceDescriptor,
     CameraParameter,
     CameraParameterApplyMode,
     CameraParameterKind,
@@ -18,7 +23,11 @@ from gripper_ai_controller.domain.models import (
     ComponentManifest,
     ImageFrame,
 )
-from gripper_ai_controller.domain.ports import CameraParameterAdapter, CameraParameterError
+from gripper_ai_controller.domain.ports import (
+    CameraParameterAdapter,
+    CameraParameterError,
+    SelectableVisionAdapter,
+)
 
 
 class HikvisionAdapterError(RuntimeError):
@@ -86,7 +95,11 @@ _CAMERA_PARAMETER_NODES = (
 """The only MVS nodes browser clients can inspect or update in this adapter."""
 
 
-class HikvisionAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapter):
+class HikvisionAdapter(
+    FrameDispatchingVisionAdapter,
+    CameraParameterAdapter,
+    SelectableVisionAdapter,
+):
     """Acquire raw frames from one MVS USB3 Vision camera.
 
     This adapter does not run inference. Its parameter capability is deliberately limited to
@@ -99,7 +112,15 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapter):
         "hikvision-camera",
         "0.1.0",
         "vision",
-        ("vision", "mvs", "usb3-vision", "frame-source", "camera-parameters"),
+        (
+            "vision",
+            "mvs",
+            "usb3-vision",
+            "frame-source",
+            "camera-parameters",
+            "camera-discovery",
+            "camera-selection",
+        ),
         "HikvisionAdapter",
     )
 
@@ -113,6 +134,8 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapter):
         frame_timeout_ms: int = 1000,
         frame_delivery_mode: str = "latest_only",
         client_factory: Optional[Callable[[], Any]] = None,
+        selected_device_id: Optional[str] = None,
+        device_calibration_ids: Optional[Mapping[str, str]] = None,
     ) -> None:
         """Store local camera selection and frame metadata without opening the device."""
 
@@ -127,9 +150,42 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapter):
                     ", ".join(self._FRAME_DELIVERY_MODES)
                 )
             )
+        if selected_device_id is not None and (
+            not isinstance(selected_device_id, str) or not selected_device_id
+        ):
+            raise ValueError("Hikvision selected_device_id must be a non-empty string when present.")
+        if device_calibration_ids is None:
+            device_calibration_ids = {}
+        if not isinstance(device_calibration_ids, Mapping) or any(
+            not isinstance(device_id, str)
+            or not device_id
+            or not isinstance(mapped_calibration_id, str)
+            or not mapped_calibration_id
+            for device_id, mapped_calibration_id in device_calibration_ids.items()
+        ):
+            raise ValueError(
+                "Hikvision device_calibration_ids must map non-empty device IDs to calibration IDs."
+            )
         self.camera_id = camera_id
-        self.calibration_id = calibration_id
-        self.camera_serial = camera_serial
+        legacy_device_id = (
+            MvsUsbCameraClient.camera_device_id(camera_serial) if camera_serial else None
+        )
+        self._allow_automatic_legacy_calibration = (
+            selected_device_id is None and legacy_device_id is None
+        )
+        self._selection_uses_device_id = selected_device_id is not None
+        self._selected_camera_device_id = selected_device_id or legacy_device_id
+        self._device_calibration_ids = dict(device_calibration_ids)  # type: Dict[str, str]
+        if calibration_id is not None and legacy_device_id is not None:
+            self._device_calibration_ids.setdefault(legacy_device_id, calibration_id)
+        self._initial_calibration_id = calibration_id
+        self.calibration_id = (
+            self._device_calibration_ids.get(self._selected_camera_device_id)
+            if self._selected_camera_device_id is not None
+            else calibration_id
+        )
+        # The opaque device ID is authoritative when both selectors are present.
+        self.camera_serial = None if selected_device_id is not None else camera_serial
         self.frame_timeout_ms = frame_timeout_ms
         self.frame_delivery_mode = frame_delivery_mode
         self.client_factory = client_factory
@@ -151,6 +207,12 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapter):
 
         return self._healthy
 
+    @property
+    def selected_camera_device_id(self) -> Optional[str]:
+        """Return the currently configured opaque camera device ID."""
+
+        return self._selected_camera_device_id
+
     @staticmethod
     def create_vendor_client(frame_delivery_mode: str = "latest_only") -> MvsUsbCameraClient:
         """Create the lazy project-local MVS client without importing native code yet."""
@@ -166,17 +228,82 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapter):
             else self.create_vendor_client(self.frame_delivery_mode)
         )
         try:
-            await self._call_client_method("open_camera", self.camera_serial)
+            if self._selection_uses_device_id and self._selected_camera_device_id is not None:
+                await self._call_client_method(
+                    "open_camera_device", self._selected_camera_device_id
+                )
+            else:
+                await self._call_client_method("open_camera", self.camera_serial)
+        except asyncio.CancelledError:
+            await self._discard_failed_startup_client()
+            raise
         except Exception as error:
-            try:
-                await self._call_client_method("close_camera")
-            except Exception:
-                pass
-            self._client = None
-            self._shutdown_native_executor()
+            await self._discard_failed_startup_client()
             raise HikvisionAdapterError("Unable to open the configured Hikvision USB camera.") from error
+        opened_device_id = getattr(self._client, "selected_device_id", None)
+        if isinstance(opened_device_id, str) and opened_device_id:
+            self._selected_camera_device_id = opened_device_id
+            self._selection_uses_device_id = True
+            if (
+                self._allow_automatic_legacy_calibration
+                and self._initial_calibration_id is not None
+            ):
+                self._device_calibration_ids.setdefault(
+                    opened_device_id, self._initial_calibration_id
+                )
+            self.calibration_id = self._device_calibration_ids.get(opened_device_id)
         self._connected = True
         self._healthy = True
+
+    async def list_camera_devices(self) -> Tuple[CameraDeviceDescriptor, ...]:
+        """Discover browser-safe USB camera descriptors without opening a device."""
+
+        async with self._capture_lock_for_current_loop():
+            return await self._discover_camera_devices_locked()
+
+    async def configure_camera_device(
+        self, device_id: Optional[str]
+    ) -> Optional[CameraDeviceDescriptor]:
+        """Change the selected USB camera only while the adapter is stopped."""
+
+        if self.started or self._client is not None:
+            raise HikvisionAdapterError(
+                "The Hikvision adapter must be stopped before camera selection changes."
+            )
+        if device_id is not None and (
+            not isinstance(device_id, str) or not device_id
+        ):
+            raise ValueError("Hikvision camera device_id must be a non-empty string or None.")
+        async with self._capture_lock_for_current_loop():
+            if self.started or self._client is not None:
+                raise HikvisionAdapterError(
+                    "The Hikvision adapter must be stopped before camera selection changes."
+                )
+            if device_id is None:
+                self._selection_uses_device_id = False
+                self._selected_camera_device_id = None
+                self.camera_serial = None
+                self.calibration_id = None
+                return None
+            devices = await self._discover_camera_devices_locked()
+            selected = next(
+                (device for device in devices if device.device_id == device_id),
+                None,
+            )
+            if selected is None:
+                raise ValueError("The requested Hikvision camera device is unavailable.")
+            self._selected_camera_device_id = device_id
+            self._selection_uses_device_id = True
+            self.camera_serial = None
+            self.calibration_id = self._device_calibration_ids.get(device_id)
+            return CameraDeviceDescriptor(
+                device_id=selected.device_id,
+                display_name=selected.display_name,
+                model_name=selected.model_name,
+                transport=selected.transport,
+                selected=True,
+                calibrated=selected.calibrated,
+            )
 
     async def on_shutdown(self) -> None:
         """Close the MVS camera after any in-flight native capture has returned safely.
@@ -274,6 +401,8 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapter):
                 updated_parameters = await self._read_supported_parameters()
             except CameraParameterError:
                 raise
+            except asyncio.CancelledError:
+                raise
             except Exception as error:
                 self._healthy = False
                 raise HikvisionAdapterError(
@@ -287,8 +416,17 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapter):
 
         if self._client is None:
             raise HikvisionAdapterError("The Hikvision MVS client is not available.")
+        return await self._call_specific_client_method(
+            self._client, method_name, *arguments
+        )
+
+    async def _call_specific_client_method(
+        self, client: Any, method_name: str, *arguments: Any
+    ) -> Any:
+        """Run one method for an active or temporary MVS client safely."""
+
         try:
-            method = getattr(self._client, method_name)
+            method = getattr(client, method_name)
         except AttributeError as error:
             raise HikvisionAdapterError("The Hikvision MVS client lacks {0}.".format(method_name)) from error
         loop = asyncio.get_event_loop()
@@ -300,9 +438,65 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapter):
             # it to finish before allowing lifecycle shutdown to release the handle.
             try:
                 await asyncio.shield(future)
+            except asyncio.CancelledError:
+                pass
             except Exception:
                 pass
             raise
+
+    async def _discover_camera_devices_locked(
+        self,
+    ) -> Tuple[CameraDeviceDescriptor, ...]:
+        """Enumerate devices while the caller owns the adapter's native lock."""
+
+        temporary_client = self._client is None
+        client = (
+            self.client_factory()
+            if temporary_client and self.client_factory is not None
+            else (
+                self.create_vendor_client(self.frame_delivery_mode)
+                if temporary_client
+                else self._client
+            )
+        )
+        try:
+            devices = await self._call_specific_client_method(
+                client, "discover_usb_devices"
+            )
+            descriptors = []
+            for device in devices:
+                if not isinstance(device, MvsUsbDevice):
+                    raise HikvisionAdapterError(
+                        "The Hikvision MVS client returned an invalid device descriptor."
+                    )
+                device_id = MvsUsbCameraClient.camera_device_id(
+                    device.serial_number
+                )
+                model_name = device.model_name or "Hikvision USB camera"
+                descriptors.append(
+                    CameraDeviceDescriptor(
+                        device_id=device_id,
+                        display_name="{0} [{1}]".format(
+                            model_name, device_id[-6:]
+                        ),
+                        model_name=model_name,
+                        transport="usb3-vision",
+                        selected=device_id == self._selected_camera_device_id,
+                        calibrated=device_id in self._device_calibration_ids,
+                    )
+                )
+            return tuple(descriptors)
+        except asyncio.CancelledError:
+            raise
+        except HikvisionAdapterError:
+            raise
+        except Exception as error:
+            raise HikvisionAdapterError(
+                "Unable to discover Hikvision USB cameras."
+            ) from error
+        finally:
+            if temporary_client:
+                self._shutdown_native_executor()
 
     async def _read_supported_parameters(self) -> Tuple[CameraParameter, ...]:
         """Read every available fixed node, skipping features unsupported by this camera model."""
@@ -455,3 +649,17 @@ class HikvisionAdapter(FrameDispatchingVisionAdapter, CameraParameterAdapter):
             self._client = None
             self._connected = False
             self._healthy = False
+
+    async def _discard_failed_startup_client(self) -> None:
+        """Finish best-effort native cleanup while preserving the startup outcome."""
+
+        try:
+            await self._close_client()
+        except asyncio.CancelledError:
+            # A repeated cancellation may interrupt this coroutine, but the shielded
+            # native call has already completed before this exception is propagated.
+            pass
+        except Exception:
+            pass
+        finally:
+            self._shutdown_native_executor()

@@ -14,9 +14,17 @@ import { useVisionAnalysis } from '../composables/useVisionAnalysis'
 
 const {
   camera,
+  devices,
+  discoveryError,
   errorMessage,
   frameAvailable,
   isLoading,
+  isSelecting,
+  refreshCameras,
+  selectedDeviceId,
+  selectionEnabled,
+  selectCameraDevice,
+  sourceRevision,
   start,
   stop,
   streamUrl,
@@ -33,13 +41,13 @@ const {
   start: startPoseTracking,
   stop: stopPoseTracking,
   trackingEnabled,
-} = usePoseTracking(selectedCameraId)
+} = usePoseTracking(selectedCameraId, sourceRevision)
 const {
   analysis,
   errorMessage: analysisErrorMessage,
   start: startVisionAnalysis,
   stop: stopVisionAnalysis,
-} = useVisionAnalysis(selectedCameraId)
+} = useVisionAnalysis(selectedCameraId, sourceRevision)
 
 const streamImage = ref<HTMLImageElement | null>(null)
 
@@ -168,12 +176,12 @@ onBeforeUnmount(() => {
             <p class="text-xs text-slate-500">正在等待相机画面...</p>
           </div>
           <div
-            v-if="!frameAvailable && streamUrl"
+            v-if="isSelecting || (!frameAvailable && streamUrl)"
             class="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/90 backdrop-blur-sm"
             role="status"
           >
             <div class="mb-3 h-8 w-8 animate-spin rounded-full border-2 border-slate-800 border-t-slate-400"></div>
-            <p class="text-xs text-slate-400">正在建立画面流...</p>
+            <p class="text-xs text-slate-400">{{ isSelecting ? '正在切换采集设备...' : '正在等待所选相机画面...' }}</p>
           </div>
         </div>
 
@@ -188,7 +196,19 @@ onBeforeUnmount(() => {
           <h2 class="mt-0.5 text-sm font-bold text-slate-100">硬件模块</h2>
         </header>
         <HardwareAdapterSection adapter-id="camera" label="相机适配器" test-id="camera-adapter-section">
-          <CameraAdapterPanel :camera="camera" :is-loading="isLoading" @reconnect="start" />
+          <CameraAdapterPanel
+            :camera="camera"
+            :devices="devices"
+            :discovery-error="discoveryError"
+            :is-loading="isLoading"
+            :is-selecting="isSelecting"
+            :selected-device-id="selectedDeviceId"
+            :selection-enabled="selectionEnabled"
+            :source-revision="sourceRevision"
+            @reconnect="start"
+            @refresh-cameras="refreshCameras"
+            @select-device="selectCameraDevice"
+          />
         </HardwareAdapterSection>
         <HardwareAdapterSection adapter-id="gripper" label="夹爪适配器" test-id="gripper-adapter">
           <GripperControlPanel />
