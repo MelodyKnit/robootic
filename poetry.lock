@@ -416,6 +416,29 @@ files = [
 ]
 
 [[package]]
+name = "opencv-contrib-python-headless"
+version = "4.9.0.80"
+description = "Wrapper package for OpenCV python bindings."
+optional = false
+python-versions = ">=3.6"
+files = [
+    {file = "opencv-contrib-python-headless-4.9.0.80.tar.gz", hash = "sha256:d027e598d4aca81ca20538dd0a95cf71b81df6cbacf088997c9ea819b1bb30c6"},
+    {file = "opencv_contrib_python_headless-4.9.0.80-cp37-abi3-macosx_10_16_x86_64.whl", hash = "sha256:83da3b09777d3aa4a35288040159fd94a6c56ff0c430a6f07b2bcaf05841a6de"},
+    {file = "opencv_contrib_python_headless-4.9.0.80-cp37-abi3-macosx_11_0_arm64.whl", hash = "sha256:b97b7ccb5ee9ad6a0dd7a764d7662716568a93171dcebd97de4d38aa2317d0e7"},
+    {file = "opencv_contrib_python_headless-4.9.0.80-cp37-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:e0a061babe3bb86c0095c3057742fa23fe94dabbaf6a3ceb13151dd91d46bbae"},
+    {file = "opencv_contrib_python_headless-4.9.0.80-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:69052c3635be4fd245f0670b9330427596d71783d28c153824aef3d607b2a907"},
+    {file = "opencv_contrib_python_headless-4.9.0.80-cp37-abi3-win32.whl", hash = "sha256:140b48d876836abc143a933ebc6342e0ce457ae4c9a66b71578f92a044ee3801"},
+    {file = "opencv_contrib_python_headless-4.9.0.80-cp37-abi3-win_amd64.whl", hash = "sha256:ddbbabc28d5d6053b6a3ccf607358d32c9952094847fc15a5382d93df1f5a688"},
+]
+
+[package.dependencies]
+numpy = [
+    {version = ">=1.21.0", markers = "python_version <= \"3.9\" and platform_system == \"Darwin\" and platform_machine == \"arm64\" and python_version >= \"3.7\""},
+    {version = ">=1.19.3", markers = "platform_system == \"Linux\" and platform_machine == \"aarch64\" and python_version >= \"3.7\""},
+    {version = ">=1.17.0", markers = "python_version > \"3.9\" and platform_system != \"Linux\" or python_version > \"3.9\" and platform_machine != \"aarch64\" or (platform_system != \"Darwin\" and platform_system != \"Linux\") and python_version >= \"3.7\" or platform_system != \"Darwin\" and python_version >= \"3.7\" and platform_machine != \"aarch64\" or platform_machine != \"arm64\" and python_version >= \"3.7\" and platform_system != \"Linux\" or (platform_machine != \"arm64\" and platform_machine != \"aarch64\") and python_version >= \"3.7\""},
+]
+
+[[package]]
 name = "pillow"
 version = "9.5.0"
 description = "Python Imaging Library (Fork)"
@@ -839,4 +862,4 @@ testing = ["big-O", "flake8 (<5)", "jaraco.functools", "jaraco.itertools", "more
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.7,<3.8"
-content-hash = "840086b155216f90df4992b24757d2cee8b268db9ea5eb29018cd07d6183fd37"
+content-hash = "8aafca76cba9f5f723d363e0a5bd1dcf96ac5ac8729bac63d32e8bf9da8f3163"

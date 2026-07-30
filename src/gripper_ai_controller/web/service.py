@@ -3,6 +3,7 @@
 import asyncio
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 import time
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
@@ -30,6 +31,11 @@ from gripper_ai_controller.domain.ports import (
 from gripper_ai_controller.pose.config_store import PoseTargetConfigStore, PoseTargetConfigStoreError
 from gripper_ai_controller.pose.models import COCO_KEYPOINT_NAMES, PoseTrackingSnapshot
 from gripper_ai_controller.pose.tracker import PoseTargetError, PoseTrackingService
+from gripper_ai_controller.object_pose.tracker import ObjectPoseTrackingSnapshot
+from gripper_ai_controller.object_detection.tracker import (
+    ObjectDetectionTrackingSnapshot,
+    UnknownDetectionModelError,
+)
 from gripper_ai_controller.vision.analysis import VisionAnalysisService
 from gripper_ai_controller.vision.models import VisionAnalysisSnapshot
 from gripper_ai_controller.web.codec import FrameEncodingError, JpegFrameEncoder
@@ -38,12 +44,16 @@ from gripper_ai_controller.web.config_store import (
     CameraParameterConfigStoreError,
     CameraSelectionConfigStore,
     CameraSelectionConfigStoreError,
+    PluginLifecycleConfigStore,
+    PluginLifecycleConfigStoreError,
 )
 from gripper_ai_controller.web.models import (
     CameraCatalogSnapshot,
     CameraPreviewError,
     CameraPreviewStatus,
     EncodedFrame,
+    ObjectPosePreviewSnapshot,
+    ObjectDetectionPreviewSnapshot,
     PosePreviewSnapshot,
 )
 
@@ -100,7 +110,21 @@ class CameraSelectionPersistenceError(RuntimeError):
     """Report a selected device that could not be saved to the explicit local config."""
 
 
+class DetectionModelUnavailableError(RuntimeError):
+    """Report a configured model whose local asset is not available for selection."""
+
+
+class PluginLifecycleControlsDisabledError(RuntimeError):
+    """Report a browser lifecycle request blocked by the local preview policy."""
+
+
+class PluginLifecyclePersistenceError(RuntimeError):
+    """Report a lifecycle transition whose local configuration state could not be saved."""
+
+
 _VISUAL_POSE_PLUGIN_ID = "visual-pose-analysis"
+_OBJECT_POSE_PLUGIN_ID = "object-pose-analysis"
+_OBJECT_DETECTION_PLUGIN_ID = "object-detection-analysis"
 
 
 _PERSISTED_PARAMETER_DEPENDENCIES = {
@@ -375,6 +399,7 @@ class CameraPreviewService:
         pose_target_store: Optional[PoseTargetConfigStore] = None,
         vision_analysis_service: Optional[VisionAnalysisService] = None,
         plugin_host: Optional[PluginHost] = None,
+        plugin_lifecycle_store: Optional[PluginLifecycleConfigStore] = None,
         camera_selection_settings: Optional[CameraSelectionSettings] = None,
         camera_selection_store: Optional[CameraSelectionConfigStore] = None,
     ) -> None:
@@ -403,6 +428,7 @@ class CameraPreviewService:
         self._parameter_store = parameter_store
         self._camera_parameter_overrides_restored = False
         self.plugin_host = plugin_host
+        self._plugin_lifecycle_store = plugin_lifecycle_store
         self.camera_selection_settings = camera_selection_settings or CameraSelectionSettings()
         self._camera_selection_store = camera_selection_store
         self.pose_tracking_service = pose_tracking_service
@@ -462,9 +488,18 @@ class CameraPreviewService:
 
     @property
     def camera_controls_enabled(self) -> bool:
-        """Return whether this local configuration permits browser parameter writes."""
+        """Return whether the local loopback preview permits browser parameter writes.
 
-        return self.settings.camera_controls_enabled
+        Parameter updates alter live camera state and are therefore subject to the
+        same loopback boundary as the other browser-controlled hardware surfaces.
+        The application factory rejects an invalid LAN configuration at startup;
+        retaining this check here also keeps direct service users fail-closed.
+        """
+
+        return bool(
+            self.settings.camera_controls_enabled
+            and self.settings.bind_host == "127.0.0.1"
+        )
 
     @property
     def camera_selection_enabled(self) -> bool:
@@ -474,6 +509,16 @@ class CameraPreviewService:
             self.camera_selection_settings.enabled
             and self._camera_selection_store is not None
             and isinstance(self.vision, SelectableVisionAdapter)
+        )
+
+    @property
+    def plugin_lifecycle_controls_enabled(self) -> bool:
+        """Return whether this local preview may persist real passive-plugin state changes."""
+
+        return bool(
+            self.settings.plugin_lifecycle_controls_enabled
+            and self.plugin_host is not None
+            and self._plugin_lifecycle_store is not None
         )
 
     async def get_camera_catalog(self) -> CameraCatalogSnapshot:
@@ -814,6 +859,94 @@ class CameraPreviewService:
             return await self.vision_analysis_service.snapshot()
         return self._disabled_vision_analysis_snapshot()
 
+    async def get_object_pose_snapshot(self) -> ObjectPoseTrackingSnapshot:
+        """Return cached known-workpiece metadata without starting capture or inference."""
+
+        plugin = await self._object_pose_plugin()
+        if plugin is None:
+            return self._disabled_object_pose_snapshot()
+        return await plugin.object_snapshot()
+
+    async def get_object_pose_preview_snapshot(self) -> ObjectPosePreviewSnapshot:
+        """Pair one object-pose cache result with MJPEG freshness without altering the stream."""
+
+        snapshot = await self.get_object_pose_snapshot()
+        latest_frame = await self.hub.latest_frame()
+        latest_frame_at = None if latest_frame is None else latest_frame.captured_at
+        frame_lag = None
+        if snapshot.captured_at is not None and latest_frame_at is not None:
+            frame_lag = latest_frame_at - snapshot.captured_at
+        overlay_fresh = bool(
+            snapshot.valid
+            and snapshot.objects
+            and frame_lag is not None
+            and 0.0 <= frame_lag <= self._object_overlay_max_frame_lag_seconds()
+        )
+        return ObjectPosePreviewSnapshot(snapshot, latest_frame_at, overlay_fresh)
+
+    async def get_object_detection_snapshot(self) -> ObjectDetectionTrackingSnapshot:
+        """Return cached semantic detections without starting capture or inference."""
+
+        plugin = await self._object_detection_plugin()
+        if plugin is None:
+            return self._disabled_object_detection_snapshot()
+        return await plugin.detection_snapshot()
+
+    async def get_object_detection_model_profiles(self):
+        """Return configured model metadata without exposing file paths to callers."""
+
+        plugin = await self._object_detection_plugin()
+        if plugin is None:
+            return ()
+        return plugin.model_profiles()
+
+    async def get_object_detection_preview_snapshot(self) -> ObjectDetectionPreviewSnapshot:
+        """Pair cached bounding boxes with the latest browser frame timestamp."""
+
+        snapshot = await self.get_object_detection_snapshot()
+        latest_frame = await self.hub.latest_frame()
+        latest_frame_at = None if latest_frame is None else latest_frame.captured_at
+        frame_lag = None
+        if snapshot.captured_at is not None and latest_frame_at is not None:
+            frame_lag = latest_frame_at - snapshot.captured_at
+        overlay_fresh = bool(
+            snapshot.valid
+            and snapshot.detections
+            and frame_lag is not None
+            and 0.0 <= frame_lag <= self._detection_overlay_max_frame_lag_seconds()
+        )
+        return ObjectDetectionPreviewSnapshot(snapshot, latest_frame_at, overlay_fresh)
+
+    async def select_object_detection_model(
+        self, model_id: str
+    ) -> ObjectDetectionTrackingSnapshot:
+        """Select one configured passive provider for the current process session."""
+
+        async with self._plugin_operation_lock_for_current_loop():
+            plugin = await self._object_detection_plugin()
+            if plugin is None:
+                raise DetectionModelUnavailableError(
+                    "Object detection is disabled by the current preview configuration."
+                )
+            snapshot = await plugin.detection_snapshot()
+            if not snapshot.enabled:
+                raise DetectionModelUnavailableError(
+                    "Object detection is disabled by the current preview configuration."
+                )
+            profile = next(
+                (candidate for candidate in plugin.model_profiles() if candidate.model_id == model_id),
+                None,
+            )
+            if profile is None:
+                raise UnknownDetectionModelError(
+                    "The requested object detection model is not configured."
+                )
+            if not Path(profile.model_path).is_file():
+                raise DetectionModelUnavailableError(
+                    "The requested object detection model file is unavailable."
+                )
+            return await plugin.select_model(model_id)
+
     async def reload_plugins(self, plugin_ids=()):
         """Serialize preview-plugin reloads with persisted visual target updates.
 
@@ -826,6 +959,106 @@ class CameraPreviewService:
             raise PluginHostError("No preview plugin host is configured.")
         async with self._plugin_operation_lock_for_current_loop():
             return await self.plugin_host.reload(plugin_ids)
+
+    async def set_plugin_enabled(self, plugin_id: str, enabled: bool):
+        """Persist and apply one passive plugin lifecycle choice as one service operation.
+
+        Lifecycle transitions run before persistence so a broken plugin never leaves a
+        future restart configured to start work that could not begin now. If the local
+        JSON write fails, the service restores the previous in-process state before it
+        reports the failure. Camera acquisition and MJPEG fan-out are not part of this
+        operation and continue independently throughout the transition.
+        """
+
+        if not self.plugin_lifecycle_controls_enabled:
+            raise PluginLifecycleControlsDisabledError(
+                "Plugin lifecycle controls are disabled by the local preview configuration."
+            )
+        if type(enabled) is not bool:
+            raise ValueError("Plugin enabled state must be a boolean.")
+        host = self.plugin_host
+        store = self._plugin_lifecycle_store
+        if host is None or store is None:
+            raise PluginLifecycleControlsDisabledError(
+                "Plugin lifecycle controls are unavailable for this preview."
+            )
+        async with self._plugin_operation_lock_for_current_loop():
+            current_status = await host.status(plugin_id)
+            if current_status.enabled == enabled:
+                return current_status
+
+            # Shield the host transition so a disconnected browser cannot cancel it
+            # after the passive plugin has changed state but before persistence starts.
+            # The same complete-then-propagate-cancellation rule is used by camera
+            # selection because both operations have an in-process and a JSON commit.
+            transition_task = asyncio.ensure_future(host.set_enabled(plugin_id, enabled))
+            next_status, cancellation_requested = await self._complete_cancellation_safe_task(
+                transition_task
+            )
+            try:
+                event_loop = asyncio.get_event_loop()
+                persistence_task = event_loop.run_in_executor(
+                    None, store.persist_enabled, plugin_id, enabled
+                )
+                _, persistence_cancelled = await self._complete_cancellation_safe_task(
+                    persistence_task
+                )
+                cancellation_requested = cancellation_requested or persistence_cancelled
+            except (PluginLifecycleConfigStoreError, OSError, ValueError) as error:
+                await self._restore_plugin_enabled_state(host, plugin_id, current_status.enabled)
+                raise PluginLifecyclePersistenceError(
+                    "The selected plugin state could not be saved to the local configuration."
+                ) from error
+            except asyncio.CancelledError:
+                # Python 3.7 still derives CancelledError from Exception. Do not
+                # reinterpret a completed-and-safe caller cancellation as a failed
+                # persistence commit that needs a compensating lifecycle transition.
+                raise
+            except Exception as error:
+                await self._restore_plugin_enabled_state(host, plugin_id, current_status.enabled)
+                raise PluginLifecyclePersistenceError(
+                    "The selected plugin state could not be saved to the local configuration."
+                ) from error
+            if cancellation_requested:
+                raise asyncio.CancelledError()
+            return next_status
+
+    async def _restore_plugin_enabled_state(
+        self, host: PluginHost, plugin_id: str, enabled: bool
+    ) -> None:
+        """Restore the prior in-process lifecycle when the local commit step fails."""
+
+        try:
+            restore_task = asyncio.ensure_future(host.set_enabled(plugin_id, enabled))
+            _, cancellation_requested = await self._complete_cancellation_safe_task(restore_task)
+        except PluginHostError as error:
+            raise PluginLifecyclePersistenceError(
+                "The selected plugin state could not be saved and the previous state could not be restored."
+            ) from error
+        if cancellation_requested:
+            raise asyncio.CancelledError()
+
+    @staticmethod
+    async def _complete_cancellation_safe_task(task):
+        """Wait for an irreversible task before preserving a caller cancellation.
+
+        ``run_in_executor`` work continues after the awaiting HTTP task is cancelled.
+        Plugin lifecycle transitions have the same property once startup or shutdown
+        has begun. Shielding the task and collecting cancellation requests ensures the
+        caller observes cancellation only after the operation has reached one coherent
+        state that can be persisted or compensated.
+        """
+
+        cancellation_requested = False
+        while True:
+            try:
+                return await asyncio.shield(task), cancellation_requested
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    raise
+                if task.done():
+                    return task.result(), True
+                cancellation_requested = True
 
     async def update_pose_target(self, target_joint: str) -> PoseTrackingSnapshot:
         """Persist a browser target selection before applying it to the live pose tracker."""
@@ -886,6 +1119,37 @@ class CameraPreviewService:
             return None
         return plugin
 
+    async def _object_pose_plugin(self):
+        """Return only the trusted passive object plugin's narrow cache interface."""
+
+        if self.plugin_host is None:
+            return None
+        try:
+            plugin = await self.plugin_host.get_plugin(_OBJECT_POSE_PLUGIN_ID)
+        except PluginHostError:
+            return None
+        if not callable(getattr(plugin, "object_snapshot", None)):
+            return None
+        return plugin
+
+    async def _object_detection_plugin(self):
+        """Return only the trusted semantic detector's cache and model-selection surface."""
+
+        if self.plugin_host is None:
+            return None
+        try:
+            plugin = await self.plugin_host.get_plugin(_OBJECT_DETECTION_PLUGIN_ID)
+        except PluginHostError:
+            return None
+        required_methods = (
+            "detection_snapshot",
+            "model_profiles",
+            "select_model",
+        )
+        if not all(callable(getattr(plugin, method_name, None)) for method_name in required_methods):
+            return None
+        return plugin
+
     def _disabled_pose_snapshot(self) -> PoseTrackingSnapshot:
         """Build the legacy disabled response when no visual pose plugin is configured."""
 
@@ -901,6 +1165,34 @@ class CameraPreviewService:
             0,
         )
 
+    def _disabled_object_pose_snapshot(self) -> ObjectPoseTrackingSnapshot:
+        """Build the safe empty response when object analysis is not configured."""
+
+        return ObjectPoseTrackingSnapshot(
+            self.camera_id,
+            False,
+            None,
+            False,
+            "object_pose_disabled",
+            None,
+            (),
+        )
+
+    def _disabled_object_detection_snapshot(self) -> ObjectDetectionTrackingSnapshot:
+        """Build a safe empty response when semantic detection is not configured."""
+
+        return ObjectDetectionTrackingSnapshot(
+            self.camera_id,
+            False,
+            None,
+            None,
+            None,
+            False,
+            "object_detection_disabled",
+            None,
+            (),
+        )
+
     def _overlay_max_frame_lag_seconds(self) -> float:
         """Read the active tracker's bounded overlay lag without starting work."""
 
@@ -914,6 +1206,29 @@ class CameraPreviewService:
             if isinstance(value, (int, float)):
                 return float(value)
         return 0.35
+
+    def _object_overlay_max_frame_lag_seconds(self) -> float:
+        """Read only the configured object overlay lag from its dedicated plugin."""
+
+        if self.plugin_host is not None:
+            plugin = self.plugin_host.registry.components.get(_OBJECT_POSE_PLUGIN_ID)
+            tracker = getattr(plugin, "tracking_service", None)
+            settings = getattr(tracker, "settings", None)
+            value = getattr(settings, "overlay_max_frame_lag_seconds", None)
+            if isinstance(value, (int, float)):
+                return float(value)
+        return 0.35
+
+    def _detection_overlay_max_frame_lag_seconds(self) -> float:
+        """Read only the configured semantic detection overlay lag."""
+
+        if self.plugin_host is not None:
+            plugin = self.plugin_host.registry.components.get(_OBJECT_DETECTION_PLUGIN_ID)
+            tracker = getattr(plugin, "tracking_service", None)
+            value = getattr(tracker, "overlay_max_frame_lag_seconds", None)
+            if isinstance(value, (int, float)):
+                return float(value)
+        return 0.5
 
     def _disabled_vision_analysis_snapshot(self) -> VisionAnalysisSnapshot:
         """Build a read-only unavailable result when no visual analysis plugin is configured."""

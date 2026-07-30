@@ -2,7 +2,7 @@
 
 此目录是唯一存放受版本控制运行时配置文件的位置。当前运行时仅接受 JSON 格式，并使用 Python 3.7 标准库进行解析。
 
-- `development.json`：安全的内存主目标、镜像目标和相机配置。
+- `development.json`：安全的内存主目标、镜像目标和相机配置；包含默认关闭的通用二维检测示例档案，但不包含模型文件。
 - `tool-camera.json`：包含工具端安装相机标定拓扑的同一安全组件图。
 - `production.example.json`：不可直接运行的模板。在实现项目本地真实适配器前，生产环境保持故障关闭。
 - `jaka-hardware.example.json`：JAKA 连接模板。复制到 `localstore/` 后填入本机控制器地址；默认关闭使能，且不应直接以模板运行。
@@ -11,13 +11,16 @@
 - `gripper-web-control.example.json`：夹爪网页控制的模拟模板。它包含模拟主目标、保守的开闭位置和控制限位，但默认关闭控制开关；复制到 `localstore/` 后才能显式开启。
 - `hikvision-usb.example.json`：海康 USB3 Vision 相机模板。复制到 `localstore/` 后填入相机序列号与真实标定标识；模板默认禁止网页写入相机参数，并以最新帧优先方式预览。
 - `pose-preview.example.json`：人体 2D 姿态追踪模板。默认关闭；复制到 `localstore/` 后填写本机相机与模型权重路径，再显式启用。
+- `object-pose-preview.example.json`：固定相机下已知平放工件的模板。默认关闭；复制到 `localstore/` 后分别填写本机空桌背景、工作单元标定、名义尺寸、厚度和抓取原点，再显式启用。
 - `vision-evaluation.example.json`：不创建相机的离线图片评测模板。它只引用 `localstore/` 中的 CUDA 模型权重，可与 `data/vision-fixtures/` 一起验证 RGB 和 Mono8 推理路径。
 - `image-centering-simulation.example.json`：静态公开图片的图像居中虚拟仿真模板。它仅包含 CUDA 姿态设置与虚拟图像平面模型，不包含相机、机器人、夹爪、执行目标或真实设备字段。
 - `invalid-component.fixture.json`：仅供加载器测试使用的受版本控制的反向测试夹具。
 
 配置文件只包含组件标识符和非敏感运行设置。不得在此放置令牌、密码、私有 IP 地址、标定采集数据、模型权重或可变运行状态；此类内容应存放在 `localstore/`。
 
-`components.plugins.preview` 是网页预览 Plugin 的显式组件列表。版本化的可运行与示例组件图都声明 `"visual-pose-analysis"`，使人体姿态与成像质量分析能够以独立生命周期运行；缺少该列表的旧配置仍保持兼容，不会被隐式补写。当前受信任的网页预览注册表仅包含 `visual-pose-analysis`；配置其他标识会在服务启动时被拒绝。新增模块必须先在服务端以固定工厂和清单完成注册，不能使用 Python 模块路径或浏览器输入动态加载。离线图片评测和图像居中仿真不声明该列表，因为它们不启动网页服务或相机采集。
+`components.plugins.preview` 是网页预览 Plugin 的固定可用清单，而不是页面每次打开时重新决定的启停表。`development.json` 显式声明 `"visual-pose-analysis"`、`"object-pose-analysis"` 与 `"object-detection-analysis"`；当前受信任注册表也只包含这三个稳定标识，配置其他标识会在服务启动时被拒绝。新增模块必须先在服务端以固定工厂和清单完成注册，不能使用 Python 模块路径或浏览器输入动态加载。专用模板可以只声明其需要的 Plugin；离线图片评测和图像居中仿真不声明该列表，因为它们不启动网页服务或相机采集。
+
+版本化 `configs/` 只定义这份可用清单，不保存网页操作者的启停选择。本机运行态必须位于显式传入、被 Git 忽略的 `localstore/` JSON 根对象 `plugin_runtime.enabled`：它是 `Plugin ID -> 严格 JSON 布尔值` 的映射，键只能引用当前 `components.plugins.preview` 中的标识。省略整个对象或其中某个标识时，为兼容既有本机配置，对应已配置 Plugin 默认为开启。该状态在网页刷新和服务重启后继续生效；切换配置文件时，各本机文件各自保存其状态。
 
 使用本机 JAKA 配置读取六轴关节角时，从子项目根目录执行：
 
@@ -65,6 +68,7 @@ poetry run gripper-ai-controller jaka-joint-dry-run --config-file configs/jaka-j
 - `gripper_controls_enabled`：`false`，严格布尔值。设为 `true` 时必须同时提供 `gripper_control` 和一个选中的 `primary` 目标，且 `bind_host` 必须严格为 `"127.0.0.1"`；命令行 `--host` 也不能绕过该限制。
 - `jaka_controls_enabled`：`false`，严格布尔值。设为 `true` 时必须同时提供 `jaka_control` 和一个选中的 `primary` JAKA 目标，且 `bind_host` 必须严格为 `"127.0.0.1"`；命令行 `--host` 同样不能绕过该限制。
 - `plugin_reload_enabled`：`false`，严格布尔值。只有 `runtime_mode` 为 `"development"`、`bind_host` 严格为 `"127.0.0.1"` 且该开关为 `true` 时，网页才允许重载已配置的预览 Plugin；生产模式始终要求重启整个服务。
+- `plugin_lifecycle_controls_enabled`：`false`，严格布尔值。只有该值为 `true`、服务绑定地址严格为 `"127.0.0.1"`，且启动配置是显式 `localstore/` JSON 时，网页才可持久化开启或关闭已配置的预览 Plugin。它独立于 `plugin_reload_enabled`：前者改变当前 Plugin 的运行状态，后者才允许在开发模式重新加载代码。
 
 未声明 `gripper_control` 或 `jaka_control` 时，网页服务只读取上述设置和 `camera`、`components.vision`、`components.vision_adapter_settings`、根 `camera_parameters`。即使同一配置还声明 `targets`、插件或安全设置，它也不会构建或启动它们。声明人工控制段后，服务只构造该段 `target_name` 指向的一个主设备以提供只读状态；只有相应控制开关启用时才允许人工动作。它不构造完整运行时、规划器或镜像目标。真实序列号、真实标定标识和本机覆盖仍必须置于被 Git 忽略的 `localstore/` 配置文件。
 
@@ -78,9 +82,13 @@ poetry run gripper-ai-controller jaka-joint-dry-run --config-file configs/jaka-j
 
 选择接口只接受刚刚由当前适配器枚举到的设备标识。切换期间复用同一逻辑 `camera_id`、采集循环、JPEG 缓存和 MJPEG URL；服务在新设备打开、参数恢复及本机配置持久化全部成功后才提交，并在失败时尝试恢复旧设备。选择状态只允许写入显式启动且规范化真实路径仍位于 `localstore/` 的 JSON，`..` 或符号链接不能将写入重定向到 `configs/` 模板。
 
+左侧 Plugin 详情中的相机选择器与右侧相机适配器面板读取同一份目录和选择状态。它不是每个 Plugin 的独立 `camera_id` 配置：选择任意一处都会切换整个共享预览管线，并清空人体、已知工件和通用检测的旧设备结果；服务不会为不同 Plugin 同时打开多台相机。
+
 ## 网页预览 Plugin
 
-网页预览只读取 `components.plugins.preview` 中已注册的稳定 Plugin 标识，不接受浏览器提供的 Python 模块名。当前注册表只包含 `visual-pose-analysis`；它只消费采集循环发布的帧事件，组合姿态追踪与成像分析缓存，并不导入相机 SDK、不持有相机/夹爪/JAKA 适配器，也不能发起人工控制或运动指令。后续新增 Plugin 必须先在服务端以固定工厂注册，不能仅通过配置或网页请求引入。
+网页预览只读取 `components.plugins.preview` 中已注册的稳定 Plugin 标识，不接受浏览器提供的 Python 模块名。当前注册表包含 `visual-pose-analysis`、`object-pose-analysis` 与 `object-detection-analysis`；三者都只消费采集循环发布的帧事件，不导入相机 SDK、不持有相机/夹爪/JAKA 适配器，也不能发起人工控制或运动指令。人体模块组合姿态与成像分析缓存；已知工件模块组合背景差分、几何档案和标定板平面投影；通用检测模块只输出模型类别、置信度和二维归一化框。后续新增 Plugin 必须先在服务端以固定工厂注册，不能仅通过配置或网页请求引入。
+
+网页启停只更新 `plugin_runtime.enabled` 中已配置模块的严格布尔状态。关闭一个 Plugin 只停止其被动分析生命周期和后续帧投递；不会停止相机采集、清空 MJPEG、断开硬件适配器，也不会触发机器人或夹爪动作。浏览器刷新和只读状态查询不会改变该运行态。
 
 当本机开发重载条件全部满足时，可通过网页接口重载一个或多个已配置 Plugin；重载期间会暂停该 Plugin 的帧分发并丢弃等待分析的旧帧，JPEG 缓存与 MJPEG 主画面继续复用原有采集循环。新实例启动失败时保留原实例；生产配置和非回环监听地址必须拒绝重载请求。
 
@@ -128,6 +136,40 @@ poetry run gripper-ai-controller jaka-joint-dry-run --config-file configs/jaka-j
 版本化 `configs/` 文件可保存安全、非敏感且可复现的仿真参数；当操作者明确以该文件作为 `--config-file` 启动时，网页服务会写回同一文件，因此 Git 工作区会出现可见变更。真实海康相机应从模板复制一份 JSON 到被 Git 忽略的 `localstore/`，再将该文件作为 `--config-file` 传入；这样设备序列号、标定标识和可变 `camera_parameters` 都不会进入 Git。由于默认监听地址可被局域网访问，开启 `camera_controls_enabled` 前必须确认网络受信任。
 
 请从子项目根目录启动 CLI，使默认 `src/web/dist` 相对于该项目解析。服务不会通过源码位置或仓库遍历推导此目录。
+
+## 通用二维目标检测段
+
+可选根对象 `object_detection` 配置被动二维语义框选，默认关闭。`development.json` 只提供配置结构和本地路径示例，仓库不包含所引用的权重或 ONNX 文件。顶层字段如下：
+
+- `enabled`：严格布尔值。只有为 `true`、已配置 `object-detection-analysis` 且选中模型可用时才处理帧。
+- `selected_model_id`：启动时选择的 `models[].model_id`。启用时必须能在模型列表中唯一匹配。
+- `models`：最多 16 个显式模型档案；每项都必须包含非空的 `model_id`、`display_name`、`provider` 和 `model_path`。
+- `max_analysis_fps`：分析频率上限，范围 `1` 至 `30`，默认 `2`。采集帧率不会因该值改变，分析忙碌时只保留最新待处理帧。
+- `overlay_max_frame_lag_seconds`：检测来源帧与最新 MJPEG 的最大时间差，范围 `0.01` 至 `10` 秒，默认 `0.5`；过期时网页隐藏旧框但保持视频。
+
+所有 `model_path` 都必须是以 `localstore/` 开头、不含绝对路径和 `..` 的相对路径。网页服务不会自动下载、转换或更新模型。操作者可显式运行 `scripts\run.bat object-detection-download-fasterrcnn`，将官方 Faster R-CNN COCO 权重安装到默认的 `localstore/models/fasterrcnn_resnet50_fpn_coco.pth`；下载完成后必须通过内置完整 SHA-256 校验才会原子替换目标文件。公共模型字段 `confidence_threshold` 范围为 `0` 至 `1`，`max_detections` 范围为 `1` 至 `1000`。
+
+`provider: "torchvision-faster-rcnn-resnet50-fpn"` 使用本地 Faster R-CNN ResNet50-FPN 状态字典，支持 `device: "cpu"|"cuda"`、可空的 COCO `allowed_labels` 和 `inference_max_side`。创建模型时显式禁用 Torchvision 自动权重与 backbone 权重下载。
+
+`provider: "yolo-world-onnx-opencv"` 使用 OpenCV DNN 读取提示类别已在导出前固化的本地 ONNX。`class_names` 必须按导出类别顺序列出且不可重复；另可配置 `input_size: [width, height]`、`backend: "cpu"|"cuda"|"cuda-fp16"`、`nms_iou_threshold` 和 `output_format`：
+
+- `ultralytics`：解析原始 `[1, 4 + 类别数, anchors]` 或转置输出；
+- `end2end`：解析每行 `[x1, y1, x2, y2, confidence, class_id]`；
+- `official-nms`：要求 OpenCV 命名输出精确包含 `num_dets`、`boxes`、`scores`、`labels`。
+
+网页模型选择只在当前服务进程会话中修改活动模型并清空旧框，不写回配置。服务重启或 Plugin 重载后仍以 `selected_model_id` 为准；要持久修改默认模型，应编辑显式本机配置并重启。详细提供器与接口约束见 [通用二维目标检测说明](../src/gripper_ai_controller/object_detection/README.md) 和 [通用二维目标检测接口](../docs/object-detection-api.md)。
+
+## 已知工件位姿段
+
+可选根对象 `object_pose` 配置固定相机、固定照明和单个已知平放工件的被动识别，默认关闭。开启时必须同时声明：
+
+- `background_reference_path`、`workcell_calibration_path`、`expected_calibration_id`：均为显式 `localstore/` 相对路径或标识；不同物理相机不能复用。
+- `profile.nominal_length_mm`、`profile.nominal_width_mm`、`profile.object_thickness_mm`：现场量取的毫米尺寸；缺失时配置拒绝启用。
+- `grasp_height_mm`：台面上方的推导抓取高度，不能超过档案厚度；`profile.grasp_origin_offset_x_mm/y_mm` 以轮廓中心为原点，非零值必须启用完整方向要求。
+- `profile.directional_feature`：默认 `none`，只支持经样本复验的 `larger_end`；未能区分头尾时返回 `pi` 周期偏航并拒绝单向使用。
+- `profile.maximum_planar_dimension_error_ratio`：投影轮廓与名义尺寸的最大相对偏差；超限返回 `planarity_suspected`，不发布基座坐标。
+
+`object-pose-analysis` 只有在配置列表显式包含时才创建。它使用单工作线程和最新帧优先策略，所有真实背景、标定、示教点和采集帧必须保留在 `localstore/`。完整字段示例、标定流程和接口契约分别见 `object-pose-preview.example.json`、`docs/object-pose-calibration.md` 与 `docs/object-pose-api.md`。
 
 ## 人体姿态段
 

@@ -5,7 +5,11 @@ from unittest.mock import patch
 import unittest
 
 from gripper_ai_controller.configuration import PoseTrackingSettings, VisionAnalysisSettings
-from gripper_ai_controller.core.components import Plugin
+from gripper_ai_controller.core.components import (
+    CameraBinding,
+    CameraBindingRequirement,
+    Plugin,
+)
 from gripper_ai_controller.core.events import FrameCaptured
 from gripper_ai_controller.core.plugin_host import (
     PluginFactoryDescriptor,
@@ -66,6 +70,12 @@ class TargetRetainingPlugin(Plugin):
         return {"target_joint": self.target_joint}
 
 
+class CameraBoundRecordingPlugin(RecordingPlugin):
+    """Expose the shared-source declaration used to exercise host-side frame routing."""
+
+    camera_binding_requirement = CameraBindingRequirement.shared_single_source()
+
+
 class ResettableBlockingPlugin(Plugin):
     """Expose a blocking frame observer and reusable reset capability for host tests."""
 
@@ -106,6 +116,16 @@ def target_retaining_plugin_factory(target_joint, created_targets):
     """Build a reloadable plugin that records the target supplied by its factory."""
 
     return TargetRetainingPlugin(target_joint, created_targets)
+
+
+def camera_bound_recording_plugin_factory(events):
+    """Build one camera-scoped observer without opening a camera adapter."""
+
+    plugin = CameraBoundRecordingPlugin(events)
+    plugin.manifest = ComponentManifest(
+        "camera-bound-recording-plugin", "0.1.0", "plugin", ("frame-observer",)
+    )
+    return plugin
 
 
 def resettable_blocking_plugin_factory(events, frame_started, frame_release):
@@ -224,6 +244,41 @@ class PluginHostTests(unittest.TestCase):
                 self.assertEqual(1, len([item for item in recording_events if isinstance(item, FrameCaptured)]))
                 status = await host.status("recording-plugin")
                 self.assertIn("planned frame observer failure", status.error)
+            finally:
+                await host.shutdown()
+
+        self.run_async(scenario())
+
+    def test_host_routes_camera_bound_plugins_only_their_declared_logical_source(self):
+        """Keep source filtering in the host instead of relying on each plugin implementation."""
+
+        async def scenario():
+            events = []
+            requirement = CameraBindingRequirement.shared_single_source()
+            host = PluginHost(
+                (
+                    PluginFactoryDescriptor(
+                        "camera-bound-recording-plugin",
+                        __name__,
+                        "camera_bound_recording_plugin_factory",
+                        {"events": events},
+                        camera_binding_requirement=requirement,
+                        camera_binding=CameraBinding(("camera-a",)),
+                    ),
+                )
+            )
+            await host.startup()
+            try:
+                self.assertTrue(await host.publish_frame(self.frame("camera-b")))
+                self.assertEqual([], [event for event in events if isinstance(event, FrameCaptured)])
+
+                self.assertTrue(await host.publish_frame(self.frame("camera-a")))
+                frame_events = [event for event in events if isinstance(event, FrameCaptured)]
+                self.assertEqual(["camera-a"], [event.frame.camera_id for event in frame_events])
+
+                status = await host.status("camera-bound-recording-plugin")
+                self.assertEqual("shared_single_source", status.camera_binding_requirement.mode)
+                self.assertEqual(("camera-a",), status.camera_binding.camera_ids)
             finally:
                 await host.shutdown()
 

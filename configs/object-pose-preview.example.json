@@ -1,0 +1,105 @@
+{
+  "camera": {
+    "camera_id": "replace-with-local-camera-id",
+    "calibration_id": "replace-with-local-calibration-id",
+    "mounting": "fixed"
+  },
+  "components": {
+    "vision": "simulated-camera",
+    "plugins": {
+      "preview": [
+        "visual-pose-analysis",
+        "object-pose-analysis",
+        "object-detection-analysis"
+      ]
+    }
+  },
+  "camera_selection": {
+    "enabled": false,
+    "calibration_ids": {}
+  },
+  "object_detection": {
+    "enabled": false,
+    "selected_model_id": "fasterrcnn-coco-local",
+    "max_analysis_fps": 2,
+    "overlay_max_frame_lag_seconds": 0.5,
+    "models": [
+      {
+        "model_id": "fasterrcnn-coco-local",
+        "display_name": "Faster R-CNN COCO（本地权重）",
+        "provider": "torchvision-faster-rcnn-resnet50-fpn",
+        "model_path": "localstore/models/fasterrcnn_resnet50_fpn_coco.pth",
+        "device": "cpu",
+        "allowed_labels": [],
+        "confidence_threshold": 0.5,
+        "inference_max_side": 960,
+        "max_detections": 30
+      },
+      {
+        "model_id": "yolo-world-tools-local",
+        "display_name": "YOLO-World 工件提示（本地 ONNX）",
+        "provider": "yolo-world-onnx-opencv",
+        "model_path": "localstore/models/yolo-world-tools.onnx",
+        "class_names": ["wrench", "pliers", "screwdriver"],
+        "input_size": [640, 640],
+        "output_format": "official-nms",
+        "backend": "cpu",
+        "confidence_threshold": 0.25,
+        "nms_iou_threshold": 0.45,
+        "max_detections": 30
+      }
+    ]
+  },
+  "web": {
+    "bind_host": "0.0.0.0",
+    "port": 8000,
+    "frontend_dist_dir": "src/web/dist",
+    "stream_fps": 10,
+    "jpeg_quality": 80,
+    "capture_retry_seconds": 1.0,
+    "camera_controls_enabled": false,
+    "plugin_reload_enabled": false
+  },
+  "object_pose": {
+    "enabled": false,
+    "background_reference_path": "localstore/object-pose/replace-with-local-camera-id/empty-table.png",
+    "workcell_calibration_path": "localstore/object-pose/replace-with-local-camera-id/workcell-calibration.json",
+    "expected_calibration_id": "replace-with-local-calibration-id",
+    "max_analysis_fps": 2,
+    "overlay_max_frame_lag_seconds": 0.35,
+    "stable_required_frames": 3,
+    "maximum_center_jitter_px": 4.0,
+    "maximum_yaw_jitter_rad": 0.0523598776,
+    "grasp_height_mm": 0.0,
+    "maximum_reprojection_error_px": 0.5,
+    "maximum_base_fit_rms_error_mm": 1.0,
+    "profile": {
+      "profile_id": "known-workpiece-v1",
+      "minimum_area_px": 400,
+      "maximum_area_px": null,
+      "minimum_aspect_ratio": 1.0,
+      "maximum_aspect_ratio": null,
+      "minimum_fill_ratio": 0.0,
+      "maximum_fill_ratio": 1.0,
+      "minimum_solidity": 0.0,
+      "require_directional_yaw": false,
+      "directional_feature": "none",
+      "minimum_directional_asymmetry": 0.15,
+      "nominal_length_mm": null,
+      "nominal_width_mm": null,
+      "object_thickness_mm": null,
+      "grasp_origin_offset_x_mm": 0.0,
+      "grasp_origin_offset_y_mm": 0.0,
+      "maximum_planar_dimension_error_ratio": 0.15
+    },
+    "difference_threshold": 25,
+    "roi": null,
+    "excluded_regions": [],
+    "morphology_kernel_size": 3,
+    "opening_iterations": 1,
+    "closing_iterations": 1,
+    "maximum_foreground_ratio": 0.45,
+    "minimum_orientation_eccentricity": 0.15,
+    "maximum_contour_points": 96
+  }
+}

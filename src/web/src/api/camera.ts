@@ -159,6 +159,109 @@ export interface VisionAnalysis {
   visibleJointNames: string[]
 }
 
+/** A normalized point in the source camera frame. */
+export interface ObjectPoseImagePoint {
+  x: number
+  y: number
+}
+
+/** A source-pixel point reported for inspection only, never for Canvas placement. */
+export interface ObjectPosePixelPoint {
+  x: number
+  y: number
+}
+
+export interface ObjectPoseBoundingBox {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface ObjectTranslationMm {
+  x: number
+  y: number
+  z: number
+}
+
+export interface ObjectOrientationRpyRad {
+  roll: number
+  pitch: number
+  yaw: number
+}
+
+/** One known-workpiece candidate from the passive object-pose plugin. */
+export interface ObjectPose {
+  profileId: string
+  confidence: number
+  boundingBox: ObjectPoseBoundingBox
+  contour: ObjectPoseImagePoint[]
+  pixelCenter: ObjectPosePixelPoint | null
+  normalizedCenter: ObjectPoseImagePoint
+  coordinateFrame: string
+  translationMm: ObjectTranslationMm | null
+  orientationRpyRad: ObjectOrientationRpyRad | null
+  observedDof: string[]
+  derivedDof: string[]
+  yawPeriodRad: number | null
+  orientationDefined: boolean
+  warning: string | null
+}
+
+/** Latest cached object-pose result; reading it never requests a new camera frame. */
+export interface ObjectPoseTracking {
+  cameraId: string
+  enabled: boolean
+  capturedAt: number | null
+  latestFrameAt: number | null
+  overlayFresh: boolean
+  valid: boolean
+  reason: string
+  inferenceLatencyMs: number | null
+  objects: ObjectPose[]
+}
+
+/** A normalized image-space box produced by a generic object detector. */
+export interface DetectionBoundingBox {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/** One backend-approved detector that can be selected for the passive preview plugin. */
+export interface DetectionModel {
+  modelId: string
+  displayName: string
+  provider: string
+  available: boolean
+  selected: boolean
+}
+
+/** One class-labelled candidate suitable for a preview-only bounding-box overlay. */
+export interface ObjectDetection {
+  detectionId: string
+  label: string
+  classId: number | null
+  confidence: number
+  boundingBox: DetectionBoundingBox
+}
+
+/** Latest cached generic detector result; reading it never starts capture or inference. */
+export interface DetectionTracking {
+  cameraId: string
+  enabled: boolean
+  selectedModelId: string | null
+  models: DetectionModel[]
+  capturedAt: number | null
+  latestFrameAt: number | null
+  overlayFresh: boolean
+  valid: boolean
+  reason: string
+  inferenceLatencyMs: number | null
+  detections: ObjectDetection[]
+}
+
 interface ApiErrorResponse {
   code?: unknown
   message?: unknown
@@ -490,6 +593,179 @@ function parseVisionAnalysis(payload: unknown): VisionAnalysis {
   }
 }
 
+/** Converts a cached known-workpiece result into bounded Canvas-safe data. */
+function parseObjectPoseTracking(payload: unknown): ObjectPoseTracking {
+  if (typeof payload !== 'object' || payload === null) {
+    throw new CameraApiError(502, 'invalid_response', '工件位姿响应无效。')
+  }
+
+  const value = payload as Record<string, unknown>
+  const rawObjects = value.objects === null || value.objects === undefined ? [] : value.objects
+  if (
+    typeof value.camera_id !== 'string' ||
+    typeof value.enabled !== 'boolean' ||
+    !isNullableNumber(value.captured_at) ||
+    !isNullableNumber(value.latest_frame_at) ||
+    typeof value.overlay_fresh !== 'boolean' ||
+    typeof value.valid !== 'boolean' ||
+    typeof value.reason !== 'string' ||
+    !isNullableNumber(value.inference_latency_ms) ||
+    !Array.isArray(rawObjects) ||
+    !rawObjects.every(isObjectPose)
+  ) {
+    throw new CameraApiError(502, 'invalid_response', '工件位姿响应不完整。')
+  }
+
+  return {
+    cameraId: value.camera_id,
+    enabled: value.enabled,
+    capturedAt: value.captured_at as number | null,
+    latestFrameAt: value.latest_frame_at as number | null,
+    overlayFresh: value.overlay_fresh,
+    valid: value.valid,
+    reason: value.reason,
+    inferenceLatencyMs: value.inference_latency_ms as number | null,
+    objects: (rawObjects as unknown[]).map(parseObjectPose),
+  }
+}
+
+/** Converts a cached generic detector payload into bounded Canvas-safe data. */
+function parseDetectionTracking(payload: unknown): DetectionTracking {
+  if (typeof payload !== 'object' || payload === null) {
+    throw new CameraApiError(502, 'invalid_response', '物品检测响应无效。')
+  }
+
+  const value = payload as Record<string, unknown>
+  const rawDetections = value.detections === null || value.detections === undefined
+    ? []
+    : value.detections
+  if (
+    typeof value.camera_id !== 'string' ||
+    typeof value.enabled !== 'boolean' ||
+    !(value.selected_model_id === null || typeof value.selected_model_id === 'string') ||
+    !Array.isArray(value.models) ||
+    !value.models.every(isDetectionModel) ||
+    !isNullableNumber(value.captured_at) ||
+    !isNullableNumber(value.latest_frame_at) ||
+    typeof value.overlay_fresh !== 'boolean' ||
+    typeof value.valid !== 'boolean' ||
+    typeof value.reason !== 'string' ||
+    !isNullableNumber(value.inference_latency_ms) ||
+    !Array.isArray(rawDetections) ||
+    !rawDetections.every(isObjectDetection)
+  ) {
+    throw new CameraApiError(502, 'invalid_response', '物品检测响应不完整。')
+  }
+
+  const models = (value.models as unknown[]).map(parseDetectionModel)
+  const selectedModelId = value.selected_model_id as string | null
+  const selectedModels = models.filter((model) => model.selected)
+  if (
+    selectedModels.length > 1 ||
+    (selectedModelId === null && selectedModels.length !== 0) ||
+    (selectedModelId !== null && !models.some((model) => model.modelId === selectedModelId && model.selected))
+  ) {
+    throw new CameraApiError(502, 'invalid_response', '物品检测模型选择状态不一致。')
+  }
+
+  return {
+    cameraId: value.camera_id,
+    enabled: value.enabled,
+    selectedModelId,
+    models,
+    capturedAt: value.captured_at as number | null,
+    latestFrameAt: value.latest_frame_at as number | null,
+    overlayFresh: value.overlay_fresh,
+    valid: value.valid,
+    reason: value.reason,
+    inferenceLatencyMs: value.inference_latency_ms as number | null,
+    detections: (rawDetections as unknown[]).map(parseObjectDetection),
+  }
+}
+
+function parseDetectionModel(payload: unknown): DetectionModel {
+  const value = payload as Record<string, unknown>
+  return {
+    modelId: value.model_id as string,
+    displayName: value.display_name as string,
+    provider: value.provider as string,
+    available: value.available as boolean,
+    selected: value.selected as boolean,
+  }
+}
+
+function parseObjectDetection(payload: unknown): ObjectDetection {
+  const value = payload as Record<string, unknown>
+  return {
+    detectionId: value.detection_id as string,
+    label: value.label as string,
+    classId: value.class_id as number | null,
+    confidence: value.confidence as number,
+    boundingBox: parseDetectionBoundingBox(value.bounding_box),
+  }
+}
+
+function parseDetectionBoundingBox(payload: unknown): DetectionBoundingBox {
+  const value = payload as Record<string, unknown>
+  return {
+    x: value.x as number,
+    y: value.y as number,
+    width: value.width as number,
+    height: value.height as number,
+  }
+}
+
+/** Maps one validated known-workpiece candidate without exposing detector internals. */
+function parseObjectPose(payload: unknown): ObjectPose {
+  const value = payload as Record<string, unknown>
+  return {
+    profileId: value.profile_id as string,
+    confidence: value.confidence as number,
+    boundingBox: parseObjectPoseBoundingBox(value.bounding_box),
+    contour: (value.contour as unknown[]).map(parseObjectPoseImagePoint),
+    pixelCenter: value.pixel_center === null ? null : parseObjectPosePixelPoint(value.pixel_center),
+    normalizedCenter: parseObjectPoseImagePoint(value.normalized_center),
+    coordinateFrame: value.coordinate_frame as string,
+    translationMm: value.translation_mm === null ? null : parseObjectTranslationMm(value.translation_mm),
+    orientationRpyRad: value.orientation_rpy_rad === null ? null : parseObjectOrientationRpyRad(value.orientation_rpy_rad),
+    observedDof: value.observed_dof as string[],
+    derivedDof: value.derived_dof as string[],
+    yawPeriodRad: value.yaw_period_rad as number | null,
+    orientationDefined: value.orientation_defined as boolean,
+    warning: value.warning === undefined ? null : value.warning as string | null,
+  }
+}
+
+function parseObjectPoseBoundingBox(payload: unknown): ObjectPoseBoundingBox {
+  const value = payload as Record<string, unknown>
+  return {
+    x: value.x as number,
+    y: value.y as number,
+    width: value.width as number,
+    height: value.height as number,
+  }
+}
+
+function parseObjectPoseImagePoint(payload: unknown): ObjectPoseImagePoint {
+  const value = payload as Record<string, unknown>
+  return { x: value.x as number, y: value.y as number }
+}
+
+function parseObjectPosePixelPoint(payload: unknown): ObjectPosePixelPoint {
+  const value = payload as Record<string, unknown>
+  return { x: value.x as number, y: value.y as number }
+}
+
+function parseObjectTranslationMm(payload: unknown): ObjectTranslationMm {
+  const value = payload as Record<string, unknown>
+  return { x: value.x as number, y: value.y as number, z: value.z as number }
+}
+
+function parseObjectOrientationRpyRad(payload: unknown): ObjectOrientationRpyRad {
+  const value = payload as Record<string, unknown>
+  return { roll: value.roll as number, pitch: value.pitch as number, yaw: value.yaw as number }
+}
+
 /** Maps a validated normalized box to the frontend data contract. */
 function parseBoundingBox(payload: unknown): PoseBoundingBox {
   const box = payload as Record<string, unknown>
@@ -753,12 +1029,156 @@ function isPoseBoundingBox(value: unknown): value is PoseBoundingBox {
   )
 }
 
+function isObjectPose(value: unknown): value is ObjectPose {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+
+  const objectPose = value as Record<string, unknown>
+  const warning = objectPose.warning === undefined ? null : objectPose.warning
+  return (
+    typeof objectPose.profile_id === 'string' &&
+    objectPose.profile_id.length > 0 &&
+    isNormalizedCoordinate(objectPose.confidence) &&
+    isObjectPoseBoundingBox(objectPose.bounding_box) &&
+    Array.isArray(objectPose.contour) &&
+    objectPose.contour.every(isObjectPoseImagePoint) &&
+    isNullableObjectPosePixelPoint(objectPose.pixel_center) &&
+    isObjectPoseImagePoint(objectPose.normalized_center) &&
+    typeof objectPose.coordinate_frame === 'string' &&
+    objectPose.coordinate_frame.length > 0 &&
+    isNullableObjectTranslationMm(objectPose.translation_mm) &&
+    isNullableObjectOrientationRpyRad(objectPose.orientation_rpy_rad) &&
+    Array.isArray(objectPose.observed_dof) &&
+    objectPose.observed_dof.every((dof) => typeof dof === 'string') &&
+    Array.isArray(objectPose.derived_dof) &&
+    objectPose.derived_dof.every((dof) => typeof dof === 'string') &&
+    isNullablePositiveFiniteNumber(objectPose.yaw_period_rad) &&
+    typeof objectPose.orientation_defined === 'boolean' &&
+    (warning === null || typeof warning === 'string')
+  )
+}
+
+function isDetectionModel(value: unknown): value is DetectionModel {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const model = value as Record<string, unknown>
+  return (
+    typeof model.model_id === 'string' &&
+    model.model_id.length > 0 &&
+    typeof model.display_name === 'string' &&
+    model.display_name.length > 0 &&
+    typeof model.provider === 'string' &&
+    typeof model.available === 'boolean' &&
+    typeof model.selected === 'boolean'
+  )
+}
+
+function isObjectDetection(value: unknown): value is ObjectDetection {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const detection = value as Record<string, unknown>
+  return (
+    typeof detection.detection_id === 'string' &&
+    detection.detection_id.length > 0 &&
+    typeof detection.label === 'string' &&
+    detection.label.length > 0 &&
+    (detection.class_id === null || (typeof detection.class_id === 'number' && Number.isInteger(detection.class_id) && detection.class_id >= 0)) &&
+    isNormalizedCoordinate(detection.confidence) &&
+    isDetectionBoundingBox(detection.bounding_box)
+  )
+}
+
+function isDetectionBoundingBox(value: unknown): value is DetectionBoundingBox {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const box = value as Record<string, unknown>
+  return (
+    isNormalizedCoordinate(box.x) &&
+    isNormalizedCoordinate(box.y) &&
+    isNormalizedCoordinate(box.width) &&
+    isNormalizedCoordinate(box.height) &&
+    box.width > 0 &&
+    box.height > 0 &&
+    box.x + box.width <= 1.000001 &&
+    box.y + box.height <= 1.000001
+  )
+}
+
+function isObjectPoseBoundingBox(value: unknown): value is ObjectPoseBoundingBox {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const box = value as Record<string, unknown>
+  return (
+    isNormalizedCoordinate(box.x) &&
+    isNormalizedCoordinate(box.y) &&
+    isNormalizedCoordinate(box.width) &&
+    isNormalizedCoordinate(box.height) &&
+    box.width > 0 &&
+    box.height > 0 &&
+    box.x + box.width <= 1.000001 &&
+    box.y + box.height <= 1.000001
+  )
+}
+
+function isObjectPoseImagePoint(value: unknown): value is ObjectPoseImagePoint {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const point = value as Record<string, unknown>
+  return isNormalizedCoordinate(point.x) && isNormalizedCoordinate(point.y)
+}
+
+function isNullableObjectPosePixelPoint(value: unknown): value is ObjectPosePixelPoint | null {
+  return value === null || isObjectPosePixelPoint(value)
+}
+
+function isObjectPosePixelPoint(value: unknown): value is ObjectPosePixelPoint {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const point = value as Record<string, unknown>
+  return isNonNegativeFiniteNumber(point.x) && isNonNegativeFiniteNumber(point.y)
+}
+
+function isNullableObjectTranslationMm(value: unknown): value is ObjectTranslationMm | null {
+  return value === null || isObjectTranslationMm(value)
+}
+
+function isObjectTranslationMm(value: unknown): value is ObjectTranslationMm {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const translation = value as Record<string, unknown>
+  return isFiniteNumber(translation.x) && isFiniteNumber(translation.y) && isFiniteNumber(translation.z)
+}
+
+function isNullableObjectOrientationRpyRad(value: unknown): value is ObjectOrientationRpyRad | null {
+  return value === null || isObjectOrientationRpyRad(value)
+}
+
+function isObjectOrientationRpyRad(value: unknown): value is ObjectOrientationRpyRad {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const orientation = value as Record<string, unknown>
+  return isFiniteNumber(orientation.roll) && isFiniteNumber(orientation.pitch) && isFiniteNumber(orientation.yaw)
+}
+
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
 }
 
 function isNonNegativeFiniteNumber(value: unknown): value is number {
   return isFiniteNumber(value) && value >= 0
+}
+
+function isNullablePositiveFiniteNumber(value: unknown): value is number | null {
+  return value === null || (isFiniteNumber(value) && value > 0)
 }
 
 function isNormalizedCoordinate(value: unknown): value is number {
@@ -880,6 +1300,31 @@ export async function updatePoseTarget(cameraId: string, targetJoint: string): P
 export async function getCameraVisionAnalysis(cameraId: string, signal?: AbortSignal): Promise<VisionAnalysis> {
   const payload = await requestJson(`/api/cameras/${encodeURIComponent(cameraId)}/vision/analysis`, { signal })
   return parseVisionAnalysis(payload)
+}
+
+/** Retrieves the latest cached known-workpiece pose without starting detector work. */
+export async function getCameraObjectPoses(cameraId: string, signal?: AbortSignal): Promise<ObjectPoseTracking> {
+  const payload = await requestJson(`/api/cameras/${encodeURIComponent(cameraId)}/objects`, { signal })
+  return parseObjectPoseTracking(payload)
+}
+
+/** Retrieves the latest cached generic detections without starting detector work. */
+export async function getCameraDetections(cameraId: string, signal?: AbortSignal): Promise<DetectionTracking> {
+  const payload = await requestJson(`/api/cameras/${encodeURIComponent(cameraId)}/detections`, { signal })
+  return parseDetectionTracking(payload)
+}
+
+/** Selects one backend-approved detector model for the configured passive plugin. */
+export async function selectObjectDetectionModel(
+  cameraId: string,
+  modelId: string,
+  signal?: AbortSignal,
+): Promise<DetectionTracking> {
+  const payload = await requestJson(
+    `/api/cameras/${encodeURIComponent(cameraId)}/detections/model-selection`,
+    { method: 'PUT', body: { model_id: modelId }, signal },
+  )
+  return parseDetectionTracking(payload)
 }
 
 /** Returns the MJPEG endpoint that a native image element can keep open. */

@@ -1,4 +1,4 @@
-import { expect, test, type Route } from '@playwright/test'
+import { expect, test, type Page, type Route } from '@playwright/test'
 
 test('模拟夹爪仅在确认解锁和明确提交后执行动作', async ({ page }) => {
   let currentStatus = gripperStatus({ initialized: false })
@@ -55,6 +55,7 @@ test('模拟夹爪仅在确认解锁和明确提交后执行动作', async ({ pa
   })
 
   await page.goto('/', { waitUntil: 'domcontentloaded' })
+  await openGripperTab(page)
   const gripperPanel = page.getByTestId('gripper-adapter')
   await expect(gripperPanel.getByRole('heading', { name: '夹爪控制' })).toBeVisible()
 
@@ -119,6 +120,7 @@ test('真机模式禁用未验证的速度和软件停止', async ({ page }) => 
   })
 
   await page.goto('/', { waitUntil: 'domcontentloaded' })
+  await openGripperTab(page)
   const gripperPanel = page.getByTestId('gripper-adapter')
 
   await expect(gripperPanel.getByText('真机 TCP')).toBeVisible()
@@ -152,6 +154,7 @@ test('夹爪运动中禁用解锁与初始化入口', async ({ page }) => {
   })
 
   await page.goto('/', { waitUntil: 'domcontentloaded' })
+  await openGripperTab(page)
   const gripperPanel = page.getByTestId('gripper-adapter')
 
   await expect(gripperPanel.getByText('正在运动', { exact: true })).toBeVisible()
@@ -177,6 +180,7 @@ test('旧版预览服务缺少夹爪接口时提示受控重启', async ({ page 
   })
 
   await page.goto('/', { waitUntil: 'domcontentloaded' })
+  await openGripperTab(page)
   const gripperPanel = page.getByTestId('gripper-adapter')
 
   await expect(gripperPanel.getByText('夹爪控制接口不可用，请重启服务。')).toBeVisible()
@@ -197,6 +201,7 @@ test('当前服务成功返回空夹爪列表时显示未配置状态', async ({
   })
 
   await page.goto('/', { waitUntil: 'domcontentloaded' })
+  await openGripperTab(page)
   const gripperPanel = page.getByTestId('gripper-adapter')
 
   await expect(gripperPanel.getByText('未配置夹爪')).toBeVisible()
@@ -205,13 +210,18 @@ test('当前服务成功返回空夹爪列表时显示未配置状态', async ({
 
 const transparentGif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==', 'base64')
 
+async function openGripperTab(page: Page): Promise<void> {
+  await page.getByRole('button', { name: '夹爪适配器', exact: true }).click()
+  await expect(page.getByTestId('gripper-adapter')).toBeVisible()
+}
+
 async function fulfillCameraApi(route: Route, path: string): Promise<boolean> {
   if (path === '/api/plugins') {
     await fulfillJson(route, {
       plugins: [{
         plugin_id: 'visual-pose-analysis', name: '视觉与姿态分析', version: '1.0.0',
         capabilities: ['frame_consumer', 'pose_tracking'], ui_kind: 'visual-pose-analysis',
-        state: 'running', error: null, reloadable: true,
+        state: 'running', enabled: true, lifecycle_controllable: true, error: null, reloadable: true,
       }],
     })
     return true

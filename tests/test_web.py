@@ -183,6 +183,14 @@ class PreviewConfigurationTests(unittest.TestCase):
         self.assertFalse(preview.vision.started)
         self.assertEqual(10, preview.settings.stream_fps)
         self.assertTrue(preview.settings.camera_controls_enabled)
+        self.assertEqual(
+            (
+                "visual-pose-analysis",
+                "object-pose-analysis",
+                "object-detection-analysis",
+            ),
+            preview.preview_plugin_names,
+        )
 
     def test_disabled_gripper_template_keeps_a_read_only_simulated_adapter(self):
         preview = load_vision_preview_config("configs/gripper-web-control.example.json")
@@ -333,6 +341,17 @@ class PreviewConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "127.0.0.1"):
             validate_web_settings(settings)
 
+    def test_enabled_camera_parameter_controls_cannot_be_exposed_on_a_lan_binding(self):
+        """Reject a direct application build before it can register write endpoints on a LAN host."""
+
+        preview = VisionPreviewConfig(
+            "camera-a",
+            SimulatedCameraAdapter(),
+            WebPreviewSettings(bind_host="0.0.0.0", camera_controls_enabled=True),
+        )
+        with self.assertRaisesRegex(ValueError, "127.0.0.1"):
+            create_web_app(preview)
+
     def test_pgi_gripper_configuration_does_not_connect_during_preview_build(self):
         payload = {
             "camera": {"camera_id": "camera-a"},
@@ -395,6 +414,17 @@ class CameraPreviewServiceTests(unittest.TestCase):
         """Run one isolated asyncio scenario under Python 3.7's standard library."""
 
         return asyncio.run(coroutine)
+
+    def test_lan_bound_direct_service_treats_camera_parameter_writes_as_disabled(self):
+        """Keep a manually constructed service fail-closed outside the app factory."""
+
+        service = CameraPreviewService(
+            "camera-a",
+            SimulatedCameraAdapter(),
+            WebPreviewSettings(bind_host="0.0.0.0", camera_controls_enabled=True),
+        )
+
+        self.assertFalse(service.camera_controls_enabled)
 
     def test_retries_unavailable_camera_then_publishes_one_frame(self):
         async def scenario():
@@ -827,6 +857,7 @@ def create_preview_application(adapter: VisionAdapter, camera_controls_enabled: 
         WebPreviewSettings(
             stream_fps=30,
             capture_retry_seconds=0.01,
+            bind_host="127.0.0.1" if camera_controls_enabled else "0.0.0.0",
             camera_controls_enabled=camera_controls_enabled,
         ),
     )

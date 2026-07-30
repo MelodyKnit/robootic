@@ -39,6 +39,8 @@ export function useVisionAnalysis(cameraId: ComputedRef<string | null>, sourceRe
       window.clearTimeout(refreshTimer)
       refreshTimer = undefined
     }
+    analysis.value = null
+    errorMessage.value = null
   }
 
   /** Reads one server-side cache entry then schedules the next passive refresh. */

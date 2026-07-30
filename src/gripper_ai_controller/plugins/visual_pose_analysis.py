@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Callable, Mapping, Optional
 
 from gripper_ai_controller.configuration import PoseTrackingSettings, VisionAnalysisSettings
-from gripper_ai_controller.core.components import Plugin
+from gripper_ai_controller.core.components import CameraBindingRequirement, Plugin
 from gripper_ai_controller.core.events import FrameCaptured
 from gripper_ai_controller.domain.models import ComponentManifest
 from gripper_ai_controller.plugins.errors import VisualPoseAnalysisCapabilityError
@@ -41,6 +41,7 @@ class VisualPoseAnalysisPlugin(Plugin):
         "build_visual_pose_analysis_plugin",
     )
     ui_kind = "visual-pose-analysis"
+    camera_binding_requirement = CameraBindingRequirement.shared_single_source()
 
     def __init__(
         self,

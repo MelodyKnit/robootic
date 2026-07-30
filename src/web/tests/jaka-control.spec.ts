@@ -1,4 +1,4 @@
-import { expect, test, type Route } from '@playwright/test'
+import { expect, test, type Page, type Route } from '@playwright/test'
 
 test('默认只读显示 J1 至 J6，且不会发出使能或运动请求', async ({ page }) => {
   const operations: Array<{ path: string; method: string }> = []
@@ -27,6 +27,7 @@ test('默认只读显示 J1 至 J6，且不会发出使能或运动请求', asyn
   })
 
   await page.goto('/', { waitUntil: 'domcontentloaded' })
+  await openRobotTab(page)
   const robotPanel = page.getByTestId('robot-adapter')
 
   await expect(robotPanel.getByRole('heading', { name: '机械臂控制' })).toBeVisible()
@@ -111,6 +112,7 @@ test('草稿步进、预览和二次确认才提交一条绝对关节运动', as
   })
 
   await page.goto('/', { waitUntil: 'domcontentloaded' })
+  await openRobotTab(page)
   const robotPanel = page.getByTestId('robot-adapter')
 
   await robotPanel.getByRole('button', { name: '解锁控制' }).click()
@@ -226,6 +228,7 @@ test('相机适配器刷新不会卸载或自动锁定常驻机械臂控制', as
   })
 
   await page.goto('/', { waitUntil: 'domcontentloaded' })
+  await openRobotTab(page)
   const robotPanel = page.getByTestId('robot-adapter')
   await robotPanel.getByRole('button', { name: '解锁控制' }).click()
   const armDialog = page.getByRole('dialog', { name: '确认解锁机械臂控制' })
@@ -234,12 +237,14 @@ test('相机适配器刷新不会卸载或自动锁定常驻机械臂控制', as
   await armDialog.getByRole('button', { name: '确认继续' }).click()
   await expect(robotPanel.getByText(/已解锁，剩余/)).toBeVisible()
 
+  await openCameraTab(page)
   await page.getByTestId('camera-adapter').getByRole('button', { name: '重新连接' }).click()
+  await openRobotTab(page)
   await expect(robotPanel.getByRole('heading', { name: '机械臂控制' })).toBeVisible()
   expect(disarmToken).toBeNull()
 })
 
-test('硬件适配器默认展开，折叠时保持控制组件挂载且不发出写请求', async ({ page }) => {
+test('硬件三选项卡切换时保持控制组件挂载且不发出写请求', async ({ page }) => {
   const operations: Array<{ path: string; method: string }> = []
   const currentStatus = robotStatus()
 
@@ -266,29 +271,32 @@ test('硬件适配器默认展开，折叠时保持控制组件挂载且不发�
   const cameraSection = page.getByTestId('camera-adapter-section')
   const gripperSection = page.getByTestId('gripper-adapter')
   const robotSection = page.getByTestId('robot-adapter')
+  const cameraContent = page.getByTestId('hardware-adapter-content-camera')
+  const gripperContent = page.getByTestId('hardware-adapter-content-gripper')
   const robotContent = page.getByTestId('hardware-adapter-content-robot')
   const robotPanel = robotSection.getByRole('region', { name: '机械臂控制' })
 
-  await expect(cameraSection.getByRole('button', { name: '收起相机适配器' })).toHaveAttribute('aria-expanded', 'true')
-  await expect(gripperSection.getByRole('button', { name: '收起夹爪适配器' })).toHaveAttribute('aria-expanded', 'true')
-  await expect(robotSection.getByRole('button', { name: '收起机械臂适配器' })).toHaveAttribute('aria-expanded', 'true')
-  await expect(robotPanel).toBeVisible()
+  await expect(cameraSection).toBeVisible()
+  await expect(gripperSection).not.toBeVisible()
+  await expect(robotSection).not.toBeVisible()
+  await expect(cameraContent).toBeAttached()
+  await expect(gripperContent).toBeAttached()
+  await expect(robotContent).toBeAttached()
 
+  await openRobotTab(page)
   await robotPanel.getByLabel('J1 目标角度').fill('5')
-  await robotSection.getByRole('button', { name: '收起机械臂适配器' }).click()
-  await expect(robotSection.getByRole('button', { name: '展开机械臂适配器' })).toHaveAttribute('aria-expanded', 'false')
+
+  await openCameraTab(page)
   await expect(robotContent).toBeAttached()
   await expect(robotContent).not.toBeVisible()
-  expect(operations.filter((operation) => operation.method !== 'GET')).toEqual([])
+  await expect(cameraContent).toBeVisible()
 
-  await robotSection.getByRole('button', { name: '展开机械臂适配器' }).click()
-  await expect(robotPanel).toBeVisible()
+  await openGripperTab(page)
+  await expect(gripperContent).toBeVisible()
+  await expect(cameraContent).not.toBeVisible()
+
+  await openRobotTab(page)
   await expect(robotPanel.getByLabel('J1 目标角度')).toHaveValue('5')
-
-  await cameraSection.getByRole('button', { name: '收起相机适配器' }).click()
-  await expect(page.getByTestId('camera-adapter')).not.toBeVisible()
-  await gripperSection.getByRole('button', { name: '收起夹爪适配器' }).click()
-  await expect(page.getByTestId('hardware-adapter-content-gripper')).not.toBeVisible()
   expect(operations.filter((operation) => operation.method !== 'GET')).toEqual([])
 })
 
@@ -322,6 +330,7 @@ test('急停状态会立即撤销浏览器令牌，即使服务器时间窗尚�
   })
 
   await page.goto('/', { waitUntil: 'domcontentloaded' })
+  await openRobotTab(page)
   const robotPanel = page.getByTestId('robot-adapter')
   await robotPanel.getByRole('button', { name: '解锁控制' }).click()
   const armDialog = page.getByRole('dialog', { name: '确认解锁机械臂控制' })
@@ -372,13 +381,28 @@ function operationResult(request: { headers(): Record<string, string> }, status:
 
 const transparentGif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==', 'base64')
 
+async function openCameraTab(page: Page): Promise<void> {
+  await page.getByRole('button', { name: '相机适配器', exact: true }).click()
+  await expect(page.getByTestId('camera-adapter-section')).toBeVisible()
+}
+
+async function openGripperTab(page: Page): Promise<void> {
+  await page.getByRole('button', { name: '夹爪适配器', exact: true }).click()
+  await expect(page.getByTestId('gripper-adapter')).toBeVisible()
+}
+
+async function openRobotTab(page: Page): Promise<void> {
+  await page.getByRole('button', { name: '机械臂适配器', exact: true }).click()
+  await expect(page.getByTestId('robot-adapter')).toBeVisible()
+}
+
 async function fulfillCameraApi(route: Route, path: string): Promise<boolean> {
   if (path === '/api/plugins') {
     await fulfillJson(route, {
       plugins: [{
         plugin_id: 'visual-pose-analysis', name: '视觉与姿态分析', version: '1.0.0',
         capabilities: ['frame_consumer', 'pose_tracking'], ui_kind: 'visual-pose-analysis',
-        state: 'running', error: null, reloadable: true,
+        state: 'running', enabled: true, lifecycle_controllable: true, error: null, reloadable: true,
       }],
     })
     return true

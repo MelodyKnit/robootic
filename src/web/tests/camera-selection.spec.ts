@@ -575,6 +575,8 @@ function visualPosePlugin() {
     capabilities: ['frame_consumer', 'pose_tracking', 'vision_analysis'],
     ui_kind: 'visual-pose-analysis',
     state: 'running',
+    enabled: true,
+    lifecycle_controllable: true,
     error: null,
     reloadable: true,
   }

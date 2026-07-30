@@ -4,6 +4,15 @@ export interface PluginError {
   message: string
 }
 
+/** Declares the logical camera sources that the plugin host routes to one plugin. */
+export interface PluginCameraBinding {
+  mode: 'shared_single_source' | 'plugin_sources'
+  cameraIds: string[]
+  minimumSources: number
+  maximumSources: number | null
+  state: 'satisfied' | 'unbound'
+}
+
 export interface RuntimePlugin {
   pluginId: string
   name: string
@@ -11,8 +20,11 @@ export interface RuntimePlugin {
   capabilities: string[]
   uiKind: string
   state: string
+  enabled: boolean
+  lifecycleControllable: boolean
   error: PluginError | null
   reloadable: boolean
+  cameraBinding: PluginCameraBinding | null
 }
 
 interface ApiErrorResponse {
@@ -51,6 +63,15 @@ export async function reloadPlugins(pluginIds: string[]): Promise<void> {
   })
 }
 
+/** Changes one configured plugin's persisted lifecycle preference. */
+export async function setPluginActivation(pluginId: string, enabled: boolean): Promise<RuntimePlugin> {
+  const payload = await requestJson(`/api/plugins/${encodeURIComponent(pluginId)}/activation`, {
+    method: 'PUT',
+    body: { enabled },
+  })
+  return parsePlugin(payload)
+}
+
 function parsePlugin(payload: unknown): RuntimePlugin {
   if (typeof payload !== 'object' || payload === null) {
     throw new PluginApiError(502, 'invalid_response', '插件条目无效。')
@@ -65,6 +86,8 @@ function parsePlugin(payload: unknown): RuntimePlugin {
     !value.capabilities.every((capability) => typeof capability === 'string') ||
     typeof value.ui_kind !== 'string' ||
     typeof value.state !== 'string' ||
+    typeof value.enabled !== 'boolean' ||
+    typeof value.lifecycle_controllable !== 'boolean' ||
     typeof value.reloadable !== 'boolean'
   ) {
     throw new PluginApiError(502, 'invalid_response', '插件条目不完整。')
@@ -77,8 +100,44 @@ function parsePlugin(payload: unknown): RuntimePlugin {
     capabilities: value.capabilities as string[],
     uiKind: value.ui_kind,
     state: value.state,
+    enabled: value.enabled,
+    lifecycleControllable: value.lifecycle_controllable,
     error: parsePluginError(value.error),
     reloadable: value.reloadable,
+    cameraBinding: parseCameraBinding(value.camera_binding),
+  }
+}
+
+function parseCameraBinding(payload: unknown): PluginCameraBinding | null {
+  if (payload === null || payload === undefined) {
+    return null
+  }
+  if (typeof payload !== 'object') {
+    throw new PluginApiError(502, 'invalid_response', '插件相机绑定无效。')
+  }
+  const value = payload as Record<string, unknown>
+  if (
+    (value.mode !== 'shared_single_source' && value.mode !== 'plugin_sources')
+    || !Array.isArray(value.camera_ids)
+    || !value.camera_ids.every((cameraId) => typeof cameraId === 'string' && cameraId.length > 0)
+    || typeof value.minimum_sources !== 'number'
+    || !Number.isInteger(value.minimum_sources)
+    || value.minimum_sources < 0
+    || (value.maximum_sources !== null && (
+      typeof value.maximum_sources !== 'number'
+      || !Number.isInteger(value.maximum_sources)
+      || value.maximum_sources < value.minimum_sources
+    ))
+    || (value.state !== 'satisfied' && value.state !== 'unbound')
+  ) {
+    throw new PluginApiError(502, 'invalid_response', '插件相机绑定字段无效。')
+  }
+  return {
+    mode: value.mode,
+    cameraIds: value.camera_ids as string[],
+    minimumSources: value.minimum_sources,
+    maximumSources: value.maximum_sources as number | null,
+    state: value.state,
   }
 }
 
@@ -103,7 +162,7 @@ function parsePluginError(payload: unknown): PluginError | null {
 
 async function requestJson(
   path: string,
-  options: { method?: 'GET' | 'POST'; body?: unknown; signal?: AbortSignal } = {},
+  options: { method?: 'GET' | 'POST' | 'PUT'; body?: unknown; signal?: AbortSignal } = {},
 ): Promise<unknown> {
   let response: Response
   try {

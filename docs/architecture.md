@@ -59,11 +59,25 @@ flowchart LR
 
 ## 网页预览 Plugin 主机
 
-网页 Plugin 通过 `components.plugins.preview` 显式配置，由 `PluginHost` 维护独立于 `Runtime` 的生命周期。采集循环在 JPEG 发布后投递 `FrameCaptured`；Plugin 只接收这个帧事件，不能取得适配器实例、设备客户端、执行目标或人工控制门面。当前受信任注册表只包含 `visual-pose-analysis`；新增标识必须先在服务端注册固定工厂，配置或浏览器请求不能引入任意 Python 模块。该 Plugin 组合现有姿态追踪和成像分析服务，为既有 `/pose`、`/pose/target` 与 `/vision/analysis` 接口提供只读快照。
+网页 Plugin 通过 `components.plugins.preview` 显式配置，由 `PluginHost` 维护独立于 `Runtime` 的生命周期。该字段是固定可用清单，不是浏览器刷新时的临时启停表。采集循环在 JPEG 发布后投递 `FrameCaptured`；Plugin 只接收这个帧事件，不能取得适配器实例、设备客户端、执行目标或人工控制门面。当前受信任注册表包含 `visual-pose-analysis`、`object-pose-analysis` 与 `object-detection-analysis`；新增标识必须先在服务端注册固定工厂，配置或浏览器请求不能引入任意 Python 模块。三个模块分别提供人体姿态/成像分析、已知工件平面位姿和通用二维检测的只读快照。
 
-`GET /api/plugins` 和 `GET /api/plugins/{plugin_id}/status` 返回已配置 Plugin 的清单和状态；`POST /api/plugins/reload` 只能引用这些稳定 ID，空 `plugin_ids` 表示全部。重载时主机会暂停相应 Plugin 的帧分发、等待活动任务结束、启动替换实例后原子切换；新实例失败则继续保留旧实例。相机采集、最新 JPEG 缓存和 MJPEG 主画面在整个过程中不被重建。
+显式 `localstore/` 启动 JSON 根对象 `plugin_runtime.enabled` 保存当前已配置 Plugin 的 `ID -> 严格布尔值` 运行态。省略整个对象或单个 ID 时，为兼容已有本机配置，对应 Plugin 默认开启。页面刷新、重新连接 MJPEG 和状态查询均只读取该状态，不能改变生命周期；因此已关闭模块不会因刷新重新启动。
 
-只有 `runtime_mode: "development"`、`web.bind_host: "127.0.0.1"` 和 `web.plugin_reload_enabled: true` 同时满足时，接口才允许重载。生产模式以及非回环监听地址必须拒绝重载并要求服务重启；该限制与夹爪/JAKA 的本机人工控制限制独立，不能通过浏览器请求放宽。
+```mermaid
+flowchart LR
+    Catalog[components.plugins.preview 固定可用清单] --> Host[PluginHost]
+    Local[localstore plugin_runtime.enabled] --> Host
+    Refresh[浏览器刷新 / GET 状态] --> ReadOnly[只读状态]
+    ReadOnly --> Host
+    Toggle[PUT activation] --> Guard[本机回环 + 生命周期开关]
+    Guard --> Host
+    Host --> Local
+    Host -. 保持运行 .-> Camera[相机采集与 MJPEG]
+```
+
+`GET /api/plugins` 和 `GET /api/plugins/{plugin_id}/status` 返回已配置 Plugin 的清单和状态，并包含持久化运行态 `enabled` 与当前请求是否可启停的 `lifecycle_controllable`。`PUT /api/plugins/{plugin_id}/activation` 只接受 `{ "enabled": true|false }` 和已配置稳定 ID；服务先完成受控的内存生命周期切换，再原子写入显式本机 JSON。写入失败时会尽力恢复原生命周期并返回失败，避免将未持久化的状态报告为成功。关闭只停止被动 Plugin 的分析任务及后续帧投递，相机采集、最新 JPEG 缓存、MJPEG 和硬件适配器不会被停止、重建或控制。`POST /api/plugins/reload` 只能引用这些稳定 ID，空 `plugin_ids` 表示全部。重载时主机会暂停相应 Plugin 的帧分发、等待活动任务结束、启动替换实例后原子切换；新实例失败则继续保留旧实例。
+
+只有 `web.plugin_lifecycle_controls_enabled: true`、`web.bind_host: "127.0.0.1"` 且使用显式 `localstore/` JSON 时，接口才允许持久化启停；否则 `lifecycle_controllable` 为假，浏览器只能读取状态。这个限制与代码重载独立：只有 `runtime_mode: "development"`、`web.bind_host: "127.0.0.1"` 和 `web.plugin_reload_enabled: true` 同时满足时，接口才允许重载。生产模式以及非回环监听地址必须拒绝重载并要求服务重启；两种授权都不能通过浏览器请求放宽。
 
 ## 网页夹爪人工控制边界
 

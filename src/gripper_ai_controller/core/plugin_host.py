@@ -7,7 +7,11 @@ import inspect
 import time
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional, Tuple
 
-from gripper_ai_controller.core.components import Plugin
+from gripper_ai_controller.core.components import (
+    CameraBinding,
+    CameraBindingRequirement,
+    Plugin,
+)
 from gripper_ai_controller.core.events import EventBus, FrameCaptured, RuntimeEvent
 from gripper_ai_controller.core.registry import ComponentRegistry
 from gripper_ai_controller.domain.models import ComponentManifest, ImageFrame
@@ -33,6 +37,14 @@ class PluginReloadFailedError(PluginHostError):
     """Report a failed replacement after the active plugin was preserved."""
 
 
+class PluginLifecycleInProgressError(PluginHostError):
+    """Report a conflicting enable, disable, reload, or shutdown transition."""
+
+
+class PluginDisabledError(PluginHostError):
+    """Report an operation that requires a currently enabled plugin instance."""
+
+
 @dataclass(frozen=True)
 class PluginFactoryDescriptor:
     """Declare one reloadable plugin factory without accepting arbitrary imports from a request.
@@ -46,6 +58,12 @@ class PluginFactoryDescriptor:
     module_name: str
     factory_name: str
     factory_kwargs: Mapping[str, Any] = field(default_factory=dict)
+    manifest: Optional[ComponentManifest] = None
+    ui_kind: str = "generic"
+    camera_binding_requirement: CameraBindingRequirement = field(
+        default_factory=CameraBindingRequirement
+    )
+    camera_binding: CameraBinding = field(default_factory=CameraBinding)
 
     def __post_init__(self) -> None:
         """Reject incomplete trusted configuration before any module is imported."""
@@ -59,6 +77,21 @@ class PluginFactoryDescriptor:
                 raise ValueError("Plugin factory {0} must be a non-empty string.".format(field_name))
         if not isinstance(self.factory_kwargs, Mapping):
             raise TypeError("Plugin factory kwargs must be a mapping.")
+        if self.manifest is not None:
+            if not isinstance(self.manifest, ComponentManifest):
+                raise TypeError("Plugin factory manifest must be a ComponentManifest.")
+            if self.manifest.name != self.plugin_id:
+                raise ValueError("Plugin factory manifest name must match plugin_id.")
+        if not isinstance(self.ui_kind, str) or not self.ui_kind:
+            raise ValueError("Plugin factory ui_kind must be a non-empty string.")
+        if not isinstance(self.camera_binding_requirement, CameraBindingRequirement):
+            raise TypeError(
+                "Plugin factory camera_binding_requirement must be a CameraBindingRequirement."
+            )
+        if not isinstance(self.camera_binding, CameraBinding):
+            raise TypeError("Plugin factory camera_binding must be a CameraBinding.")
+        if not self.camera_binding.satisfies(self.camera_binding_requirement):
+            raise ValueError("Plugin factory camera binding does not satisfy its requirement.")
 
 
 @dataclass(frozen=True)
@@ -73,6 +106,9 @@ class PluginStatus:
     lifecycle_state: str
     error: Optional[str]
     reloadable: bool
+    enabled: bool
+    camera_binding_requirement: CameraBindingRequirement
+    camera_binding: CameraBinding
 
 
 @dataclass
@@ -99,6 +135,7 @@ class PluginHost:
         event_bus: Optional[EventBus] = None,
         registry: Optional[ComponentRegistry] = None,
         reload_enabled: bool = False,
+        enabled_plugin_ids: Optional[Mapping[str, bool]] = None,
     ) -> None:
         """Bind trusted plugin descriptors to an owned event and registry boundary."""
 
@@ -110,12 +147,29 @@ class PluginHost:
                 raise ValueError("Duplicate plugin identifier: {0}".format(descriptor.plugin_id))
             descriptor_by_id[descriptor.plugin_id] = descriptor
         self._descriptors = descriptor_by_id
+        enabled_by_id = {}  # type: Dict[str, bool]
+        provided_enabled = dict(enabled_plugin_ids or {})
+        unknown_enabled = set(provided_enabled).difference(descriptor_by_id)
+        if unknown_enabled:
+            raise ValueError(
+                "Plugin enabled-state identifiers are not configured: {0}".format(
+                    ", ".join(sorted(unknown_enabled))
+                )
+            )
+        for plugin_id in descriptor_by_id:
+            value = provided_enabled.get(plugin_id, True)
+            if type(value) is not bool:
+                raise TypeError("Plugin enabled states must be booleans.")
+            enabled_by_id[plugin_id] = value
+        self._enabled = enabled_by_id
         self.event_bus = event_bus or EventBus()
         self.registry = registry or ComponentRegistry()
         self.reload_enabled = reload_enabled
         self._slots = {}  # type: Dict[str, _PluginSlot]
+        self._errors = {}  # type: Dict[str, Optional[str]]
         self._started = False
         self._reloading = set()
+        self._transition_targets = {}  # type: Dict[str, bool]
         self._state_lock = None  # type: Optional[Any]
         self._frame_dispatch_lock = None  # type: Optional[Any]
         self._frame_state_reset_lock = None  # type: Optional[Any]
@@ -141,6 +195,8 @@ class PluginHost:
         started_slots = []
         try:
             for descriptor in descriptors:
+                if not self._enabled[descriptor.plugin_id]:
+                    continue
                 slot = await self._create_started_slot(descriptor, reload_module=False)
                 started_slots.append(slot)
         except Exception as error:
@@ -164,6 +220,7 @@ class PluginHost:
                 return
             self._started = False
             self._reloading = set(self._slots)
+            self._transition_targets = {}
             slots = tuple(self._slots.values())
             offered_frame_task = self._offered_frame_task
             self._pending_offered_frame = None
@@ -199,7 +256,8 @@ class PluginHost:
             raise TypeError("PluginHost accepts ImageFrame instances only.")
         async with self._state_lock_for_current_loop():
             active = self._started and not self._resetting_frame_state and any(
-                plugin_id not in self._reloading for plugin_id in self._slots
+                plugin_id not in self._reloading and plugin_id not in self._transition_targets
+                for plugin_id in self._slots
             )
         if not active:
             return False
@@ -316,34 +374,7 @@ class PluginHost:
             result = []
             for plugin_id, descriptor in self._descriptors.items():
                 slot = self._slots.get(plugin_id)
-                if slot is None:
-                    result.append(
-                        PluginStatus(
-                            plugin_id,
-                            plugin_id,
-                            "",
-                            (),
-                            "generic",
-                            "stopped",
-                            None,
-                            False,
-                        )
-                    )
-                    continue
-                manifest = self._manifest_for(slot.plugin)
-                lifecycle_state = "reloading" if plugin_id in self._reloading else "running"
-                result.append(
-                    PluginStatus(
-                        plugin_id,
-                        manifest.name,
-                        manifest.version,
-                        manifest.capabilities,
-                        self._ui_kind_for(slot.plugin),
-                        lifecycle_state,
-                        slot.error,
-                        self.reload_enabled and lifecycle_state == "running",
-                    )
-                )
+                result.append(self._status_for_locked(plugin_id, descriptor, slot))
             return tuple(result)
 
     async def status(self, plugin_id: str) -> PluginStatus:
@@ -360,10 +391,49 @@ class PluginHost:
         async with self._state_lock_for_current_loop():
             if plugin_id not in self._descriptors:
                 raise UnknownPluginError("Unknown plugin: {0}".format(plugin_id))
+            if not self._enabled[plugin_id]:
+                raise PluginDisabledError("Plugin is disabled: {0}".format(plugin_id))
             slot = self._slots.get(plugin_id)
             if slot is None:
                 raise PluginHostError("Plugin is not started: {0}".format(plugin_id))
             return slot.plugin
+
+    async def set_enabled(self, plugin_id: str, enabled: bool) -> PluginStatus:
+        """Start or stop one trusted passive plugin without touching camera acquisition.
+
+        The host owns only the in-process lifecycle. Its caller persists the selected
+        state before reporting success to a browser, and compensates this transition
+        if the explicit local configuration cannot be saved.
+        """
+
+        if type(enabled) is not bool:
+            raise TypeError("Plugin enabled state must be a boolean.")
+        async with self._state_lock_for_current_loop():
+            if plugin_id not in self._descriptors:
+                raise UnknownPluginError("Unknown plugin: {0}".format(plugin_id))
+            if not self._started:
+                raise PluginHostError("PluginHost must be started before changing plugin state.")
+            if plugin_id in self._reloading or plugin_id in self._transition_targets:
+                raise PluginLifecycleInProgressError(
+                    "Plugin lifecycle transition is already in progress: {0}".format(plugin_id)
+                )
+            if self._enabled[plugin_id] == enabled:
+                return self._status_for_locked(
+                    plugin_id, self._descriptors[plugin_id], self._slots.get(plugin_id)
+                )
+            self._transition_targets[plugin_id] = enabled
+
+        try:
+            async with self._frame_dispatch_lock_for_current_loop():
+                if enabled:
+                    await self._enable_one(plugin_id)
+                else:
+                    await self._disable_one(plugin_id)
+        finally:
+            async with self._state_lock_for_current_loop():
+                self._transition_targets.pop(plugin_id, None)
+
+        return await self.status(plugin_id)
 
     async def reload(self, plugin_ids: Iterable[str] = ()) -> Tuple[PluginStatus, ...]:
         """Atomically replace selected plugins while preserving an old instance on failure.
@@ -387,10 +457,22 @@ class PluginHost:
             unknown = [plugin_id for plugin_id in requested if plugin_id not in self._descriptors]
             if unknown:
                 raise UnknownPluginError("Unknown plugin: {0}".format(unknown[0]))
+            disabled = [plugin_id for plugin_id in requested if not self._enabled[plugin_id]]
+            if disabled:
+                raise PluginDisabledError("Plugin is disabled: {0}".format(disabled[0]))
             in_progress = [plugin_id for plugin_id in requested if plugin_id in self._reloading]
             if in_progress:
                 raise PluginReloadInProgressError(
                     "Plugin reload is already in progress: {0}".format(in_progress[0])
+                )
+            transitioning = [
+                plugin_id for plugin_id in requested if plugin_id in self._transition_targets
+            ]
+            if transitioning:
+                raise PluginLifecycleInProgressError(
+                    "Plugin lifecycle transition is already in progress: {0}".format(
+                        transitioning[0]
+                    )
                 )
             self._reloading.update(requested)
 
@@ -429,8 +511,14 @@ class PluginHost:
                     slot
                     for plugin_id, slot in self._slots.items()
                     if plugin_id not in self._reloading
+                    and plugin_id not in self._transition_targets
                 )
             for slot in slots:
+                requirement = slot.descriptor.camera_binding_requirement
+                if requirement.requires_camera and not slot.descriptor.camera_binding.accepts(
+                    event.frame.camera_id
+                ):
+                    continue
                 try:
                     await slot.plugin.handle_event(event)
                 except Exception as error:
@@ -460,6 +548,49 @@ class PluginHost:
             await self._record_error(plugin_id, message)
         return None
 
+    async def _enable_one(self, plugin_id: str) -> None:
+        """Construct and register one replacement only after its startup succeeds."""
+
+        async with self._state_lock_for_current_loop():
+            descriptor = self._descriptors[plugin_id]
+        try:
+            slot = await self._create_started_slot(descriptor, reload_module=False)
+        except Exception as error:
+            message = "Plugin startup failed: {0}".format(error)
+            await self._record_error(plugin_id, message)
+            raise PluginHostError(message) from error
+        async with self._state_lock_for_current_loop():
+            self._slots[plugin_id] = slot
+            self._enabled[plugin_id] = True
+            self._errors[plugin_id] = None
+
+    async def _disable_one(self, plugin_id: str) -> None:
+        """Drain one active plugin before removing it from browser frame delivery."""
+
+        async with self._state_lock_for_current_loop():
+            slot = self._slots.get(plugin_id)
+            if slot is None:
+                self._enabled[plugin_id] = False
+                self._errors[plugin_id] = None
+                return
+        try:
+            descriptor = await self._descriptor_for_reload(slot)
+        except Exception as error:
+            message = "Plugin state preservation failed: {0}".format(error)
+            await self._record_error(plugin_id, message)
+            raise PluginHostError(message) from error
+        shutdown_error = await self._shutdown_slot(slot)
+        if shutdown_error is not None:
+            message = "Plugin shutdown failed: {0}".format(shutdown_error)
+            await self._record_error(plugin_id, message)
+            raise PluginHostError(message)
+        async with self._state_lock_for_current_loop():
+            self.registry.unregister(plugin_id)
+            self._descriptors[plugin_id] = descriptor
+            self._slots.pop(plugin_id, None)
+            self._enabled[plugin_id] = False
+            self._errors[plugin_id] = None
+
     async def _create_started_slot(
         self, descriptor: PluginFactoryDescriptor, reload_module: bool
     ) -> _PluginSlot:
@@ -483,6 +614,13 @@ class PluginHost:
             raise PluginHostError(
                 "Plugin factory returned manifest '{0}' for configured plugin '{1}'.".format(
                     manifest.name, descriptor.plugin_id
+                )
+            )
+        requirement = self._camera_binding_requirement_for(plugin)
+        if requirement != descriptor.camera_binding_requirement:
+            raise PluginHostError(
+                "Plugin camera binding requirement differs from trusted descriptor: {0}".format(
+                    descriptor.plugin_id
                 )
             )
         try:
@@ -511,6 +649,7 @@ class PluginHost:
         """Store an operator-safe plugin error without interrupting other frame observers."""
 
         async with self._state_lock_for_current_loop():
+            self._errors[plugin_id] = message
             slot = self._slots.get(plugin_id)
             if slot is not None:
                 slot.error = message
@@ -572,3 +711,55 @@ class PluginHost:
 
         ui_kind = getattr(plugin, "ui_kind", "generic")
         return ui_kind if isinstance(ui_kind, str) and ui_kind else "generic"
+
+    @staticmethod
+    def _camera_binding_requirement_for(plugin: Plugin) -> CameraBindingRequirement:
+        """Return the plugin-declared camera-input contract before it receives frames."""
+
+        requirement = getattr(plugin, "camera_binding_requirement", None)
+        if not isinstance(requirement, CameraBindingRequirement):
+            raise TypeError("Plugins must expose a CameraBindingRequirement.")
+        return requirement
+
+    def _status_for_locked(
+        self,
+        plugin_id: str,
+        descriptor: PluginFactoryDescriptor,
+        slot: Optional[_PluginSlot],
+    ) -> PluginStatus:
+        """Build one status while the state lock protects slots and lifecycle markers."""
+
+        if slot is not None:
+            manifest = self._manifest_for(slot.plugin)
+            ui_kind = self._ui_kind_for(slot.plugin)
+        elif descriptor.manifest is not None:
+            manifest = descriptor.manifest
+            ui_kind = descriptor.ui_kind
+        else:
+            manifest = ComponentManifest(plugin_id, "", "plugin", ())
+            ui_kind = descriptor.ui_kind
+        if plugin_id in self._reloading:
+            lifecycle_state = "reloading"
+        elif plugin_id in self._transition_targets:
+            lifecycle_state = (
+                "starting" if self._transition_targets[plugin_id] else "stopping"
+            )
+        elif not self._enabled[plugin_id]:
+            lifecycle_state = "failed" if self._errors.get(plugin_id) else "disabled"
+        elif slot is not None:
+            lifecycle_state = "running"
+        else:
+            lifecycle_state = "stopped"
+        return PluginStatus(
+            plugin_id,
+            manifest.name,
+            manifest.version,
+            manifest.capabilities,
+            ui_kind,
+            lifecycle_state,
+            self._errors.get(plugin_id),
+            self.reload_enabled and lifecycle_state == "running",
+            self._enabled[plugin_id],
+            descriptor.camera_binding_requirement,
+            descriptor.camera_binding,
+        )

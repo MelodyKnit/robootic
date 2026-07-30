@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from gripper_ai_controller.domain.models import CameraDeviceDescriptor
+from gripper_ai_controller.object_detection.tracker import ObjectDetectionTrackingSnapshot
+from gripper_ai_controller.object_pose.tracker import ObjectPoseTrackingSnapshot
 from gripper_ai_controller.pose.models import PoseTrackingSnapshot
 
 
@@ -49,5 +51,23 @@ class PosePreviewSnapshot:
     """Pose metadata paired with the browser JPEG timestamp used for overlay freshness."""
 
     snapshot: PoseTrackingSnapshot
+    latest_frame_at: Optional[float]
+    overlay_fresh: bool
+
+
+@dataclass(frozen=True)
+class ObjectPosePreviewSnapshot:
+    """Object-pose cache paired with the JPEG timestamp used for overlay freshness."""
+
+    snapshot: ObjectPoseTrackingSnapshot
+    latest_frame_at: Optional[float]
+    overlay_fresh: bool
+
+
+@dataclass(frozen=True)
+class ObjectDetectionPreviewSnapshot:
+    """Semantic detection cache paired with the JPEG timestamp used for overlay freshness."""
+
+    snapshot: ObjectDetectionTrackingSnapshot
     latest_frame_at: Optional[float]
     overlay_fresh: bool

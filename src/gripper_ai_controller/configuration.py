@@ -5,6 +5,7 @@ import math
 from typing import Any, Dict, Mapping, Optional
 
 from gripper_ai_controller.domain.models import CameraParameterValue
+from gripper_ai_controller.object_pose.models import ObjectPoseSettings
 
 
 class CameraParameterConfigurationError(ValueError):
@@ -77,6 +78,7 @@ class WebPreviewSettings:
     gripper_controls_enabled: bool = False
     jaka_controls_enabled: bool = False
     plugin_reload_enabled: bool = False
+    plugin_lifecycle_controls_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -187,3 +189,28 @@ class VisionAnalysisSettings:
     minimum_sharpness: float = 5.0
     sample_max_side: int = 640
     max_analysis_fps: int = 1
+
+
+@dataclass(frozen=True)
+class WorkpiecePoseSettings:
+    """Configuration for passive known-workpiece planar pose analysis.
+
+    ``X/Y/Yaw`` are the only visual measurements published by this first
+    implementation. ``Z/Roll/Pitch`` are explicitly derived from the fixed board
+    plane and the declared grasp height. The configuration never describes a robot
+    action, a gripper command, or a camera SDK operation.
+    """
+
+    enabled: bool = False
+    background_reference_path: Optional[str] = None
+    workcell_calibration_path: Optional[str] = None
+    expected_calibration_id: Optional[str] = None
+    detector_settings: ObjectPoseSettings = field(default_factory=ObjectPoseSettings)
+    max_analysis_fps: int = 2
+    overlay_max_frame_lag_seconds: float = 0.35
+    stable_required_frames: int = 3
+    maximum_center_jitter_px: float = 4.0
+    maximum_yaw_jitter_rad: float = 0.08
+    grasp_height_mm: float = 0.0
+    maximum_reprojection_error_px: float = 0.5
+    maximum_base_fit_rms_error_mm: float = 1.0

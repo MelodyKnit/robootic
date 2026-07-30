@@ -44,6 +44,8 @@ export function usePoseTracking(cameraId: ComputedRef<string | null>, sourceRevi
       window.clearTimeout(refreshTimer)
       refreshTimer = undefined
     }
+    pose.value = null
+    errorMessage.value = null
   }
 
   /** Persists a user choice through the explicit pose-target API resource. */

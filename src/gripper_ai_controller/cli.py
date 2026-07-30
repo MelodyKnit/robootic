@@ -13,6 +13,8 @@ from gripper_ai_controller.pose.estimator import (
     download_keypoint_rcnn_weights,
 )
 from gripper_ai_controller.pose.gpu import inspect_cuda_gpu
+from gripper_ai_controller.object_detection.models import DetectionProviderError
+from gripper_ai_controller.object_detection.weights import install_faster_rcnn_coco_weights
 from gripper_ai_controller.vision.analysis import JointVisibilityEvaluator
 from gripper_ai_controller.vision.fixtures import (
     VisionFixtureManifestError,
@@ -223,6 +225,19 @@ def _download_pose_weights(args: argparse.Namespace) -> None:
     print("Downloaded Keypoint R-CNN weights: {0}".format(saved_path))
 
 
+def _download_object_detection_weights(args: argparse.Namespace) -> None:
+    """按显式 CLI 请求安装官方 Faster R-CNN 权重到 localstore。"""
+
+    path = Path(args.weights_file)
+    if path.is_absolute() or ".." in path.parts or not path.parts or path.parts[0] != "localstore":
+        raise ValueError("--weights-file must be a localstore-relative path without parent traversal.")
+    try:
+        saved_path = install_faster_rcnn_coco_weights(args.weights_file)
+    except DetectionProviderError as error:
+        raise RuntimeError(str(error))
+    print("Downloaded Faster R-CNN weights: {0}".format(saved_path))
+
+
 def _vision_evaluate(args: argparse.Namespace) -> None:
     """Evaluate public local image fixtures without constructing a camera or control runtime."""
 
@@ -369,8 +384,14 @@ def _temporary_output_path(value: str, argument_name: str) -> Path:
 def main() -> None:
     """Parse commands without creating a physical device connection."""
 
+    from gripper_ai_controller.calibration.cli import (
+        add_calibration_commands,
+        execute_calibration_command,
+    )
+
     parser = argparse.ArgumentParser(description="Run the gripper AI controller runtime.")
     subparsers = parser.add_subparsers(dest="command")
+    add_calibration_commands(subparsers)
     run = subparsers.add_parser("run", help="Run one safe development objective.")
     run.add_argument("--config-file", default="configs/development.json")
     run.add_argument("--objective", default="Pick the detected workpiece")
@@ -413,6 +434,14 @@ def main() -> None:
         help="Explicitly download official Keypoint R-CNN weights into localstore.",
     )
     weights.add_argument("--weights-file", required=True)
+    detection_weights = subparsers.add_parser(
+        "object-detection-download-fasterrcnn",
+        help="Explicitly download official Faster R-CNN weights into localstore.",
+    )
+    detection_weights.add_argument(
+        "--weights-file",
+        default="localstore/models/fasterrcnn_resnet50_fpn_coco.pth",
+    )
     evaluation = subparsers.add_parser(
         "vision-evaluate",
         help="Evaluate local public-image fixtures without opening a camera or control runtime.",
@@ -436,10 +465,14 @@ def main() -> None:
         args.command = "run"
         args.config_file = "configs/development.json"
         args.objective = "Pick the detected workpiece"
-    if args.command == "gpu-check":
+    if args.command.startswith("calibration-"):
+        execute_calibration_command(args)
+    elif args.command == "gpu-check":
         _gpu_check(args)
     elif args.command == "pose-download-weights":
         _download_pose_weights(args)
+    elif args.command == "object-detection-download-fasterrcnn":
+        _download_object_detection_weights(args)
     elif args.command == "vision-evaluate":
         _vision_evaluate(args)
     elif args.command == "image-centering-simulate":

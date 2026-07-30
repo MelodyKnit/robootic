@@ -44,8 +44,17 @@ test('显示可解码的实时相机画面', async ({ page }) => {
   await expect(page.getByTestId('camera-device-selector').locator('option')).toHaveCount(1)
   await expect(page.getByTestId('plugin-card-visual-pose-analysis')).toBeVisible()
   await expect(page.getByTestId('camera-adapter')).toBeVisible()
+  await expect(page.getByTestId('gripper-adapter')).not.toBeVisible()
+  await expect(page.getByTestId('robot-adapter')).not.toBeVisible()
+
+  await page.getByRole('button', { name: '夹爪适配器', exact: true }).click()
   await expect(page.getByTestId('gripper-adapter')).toBeVisible()
+  await expect(page.getByTestId('camera-adapter-section')).not.toBeVisible()
+  await page.getByRole('button', { name: '机械臂适配器', exact: true }).click()
   await expect(page.getByTestId('robot-adapter')).toBeVisible()
+  await expect(page.getByTestId('gripper-adapter')).not.toBeVisible()
+  await page.getByRole('button', { name: '相机适配器', exact: true }).click()
+  await expect(page.getByTestId('camera-adapter-section')).toBeVisible()
   const pluginBounds = await page.getByTestId('plugin-workspace').boundingBox()
   const previewBounds = await page.locator('section[aria-label="相机实时画面"]').boundingBox()
   const adapterBounds = await page.locator('aside[aria-label="硬件适配器"]').boundingBox()
@@ -56,6 +65,8 @@ test('显示可解码的实时相机画面', async ({ page }) => {
   expect(previewBounds.x).toBeLessThan(adapterBounds.x)
 
   await page.getByTestId('plugin-details-visual-pose-analysis').locator('summary').click()
+  await expect(page.getByTestId('plugin-camera-binding-visual-pose-analysis')).toContainText('共享单源')
+  await expect(page.getByTestId('plugin-camera-selector-visual-pose-analysis')).toHaveValue('sim-device')
   await expect(page.getByRole('heading', { name: '人体姿态' })).toBeVisible()
   await expect(page.getByRole('heading', { name: '成像与识别' })).toBeVisible()
   await expect(page.getByText('主人体框', { exact: true })).toBeVisible()
@@ -83,6 +94,9 @@ test('姿态刷新不会替换 MJPEG，过期时隐藏叠加且只在流错误�
   let poseFrameRequested = false
   await page.route('**://*/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
+    if (await fulfillPluginApi(route, path)) {
+      return
+    }
     if (path.endsWith('/pose/frame')) {
       poseFrameRequested = true
       await route.fulfill({ status: 404, contentType: 'application/json', body: '{"code":"not_found"}' })
@@ -149,6 +163,8 @@ test('插件展开和重载不会替换连续 MJPEG，已注册的通用插件�
       capabilities: ['audit'],
       ui_kind: 'generic',
       state: 'running',
+      enabled: true,
+      lifecycle_controllable: false,
       error: null,
       reloadable: false,
     },
@@ -216,9 +232,101 @@ test('插件展开和重载不会替换连续 MJPEG，已注册的通用插件�
   await expect(streamImage).toHaveAttribute('src', initialSource ?? '')
 })
 
+test('关闭视觉插件会持久化状态、停止对应轮询且不重建 MJPEG', async ({ page }) => {
+  let plugin = visualPosePlugin()
+  const activationRequests: unknown[] = []
+  let poseRequests = 0
+  let analysisRequests = 0
+  await page.route('**://*/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (path === '/api/plugins') {
+      await fulfillJson(route, { plugins: [plugin] })
+      return
+    }
+    if (path === '/api/plugins/visual-pose-analysis/activation' && request.method() === 'PUT') {
+      const payload = request.postDataJSON() as { enabled?: unknown }
+      activationRequests.push(payload)
+      if (typeof payload.enabled !== 'boolean') {
+        await route.fulfill({ status: 422, contentType: 'application/json', body: '{"code":"invalid_enabled"}' })
+        return
+      }
+      plugin = {
+        ...plugin,
+        enabled: payload.enabled,
+        state: payload.enabled ? 'running' : 'stopped',
+      }
+      await fulfillJson(route, plugin)
+      return
+    }
+    if (path === '/api/cameras') {
+      await fulfillJson(route, cameraCatalog())
+      return
+    }
+    if (path === '/api/cameras/sim-camera/status') {
+      await fulfillJson(route, cameraStatus())
+      return
+    }
+    if (path === '/api/cameras/sim-camera/stream') {
+      await route.fulfill({ contentType: 'image/gif', body: transparentGif })
+      return
+    }
+    if (path === '/api/cameras/sim-camera/pose') {
+      poseRequests += 1
+      await fulfillJson(route, posePayload(true))
+      return
+    }
+    if (path === '/api/cameras/sim-camera/vision/analysis') {
+      analysisRequests += 1
+      await fulfillJson(route, visionAnalysisPayload())
+      return
+    }
+    if (path === '/api/cameras/sim-camera/parameters') {
+      await fulfillJson(route, { camera_id: 'sim-camera', write_enabled: false, parameters: [] })
+      return
+    }
+    await route.fulfill({ status: 404, contentType: 'application/json', body: '{"code":"not_found"}' })
+  })
+
+  await page.goto('/', { waitUntil: 'domcontentloaded' })
+
+  const streamImage = page.getByTestId('camera-stream')
+  await expect(streamImage).toBeVisible()
+  await expect(page.getByTestId('pose-overlay')).toBeVisible()
+  await expect.poll(() => poseRequests).toBeGreaterThan(0)
+  await expect.poll(() => analysisRequests).toBeGreaterThan(0)
+  const initialSource = await streamImage.getAttribute('src')
+  const firstImage = await streamImage.elementHandle()
+
+  const pluginCard = page.getByTestId('plugin-card-visual-pose-analysis')
+  await pluginCard.getByTitle('关闭功能模块').click()
+  await expect.poll(() => activationRequests).toEqual([{ enabled: false }])
+  await expect(page.getByTestId('plugin-activation-visual-pose-analysis')).not.toBeChecked()
+  await expect(pluginCard).toContainText('已关闭')
+  await expect(page.getByTestId('pose-overlay')).toHaveCount(0)
+  await expect(page.getByTestId('plugin-details-visual-pose-analysis')).toHaveCount(0)
+  const poseRequestsAfterDisable = poseRequests
+  const analysisRequestsAfterDisable = analysisRequests
+
+  await page.waitForTimeout(700)
+  expect(poseRequests).toBe(poseRequestsAfterDisable)
+  expect(analysisRequests).toBe(analysisRequestsAfterDisable)
+  await expect(streamImage).toHaveAttribute('src', initialSource ?? '')
+  expect(await firstImage?.evaluate((image) => image.isConnected)).toBeTruthy()
+
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await expect(page.getByTestId('plugin-activation-visual-pose-analysis')).not.toBeChecked()
+  await page.waitForTimeout(300)
+  expect(poseRequests).toBe(poseRequestsAfterDisable)
+  expect(analysisRequests).toBe(analysisRequestsAfterDisable)
+})
+
 test('锁定关节暂时不可用时仍显示新鲜人体骨架', async ({ page }) => {
   await page.route('**://*/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
+    if (await fulfillPluginApi(route, path)) {
+      return
+    }
     if (path === '/api/cameras') {
       await fulfillJson(route, cameraCatalog())
       return
@@ -257,6 +365,9 @@ test('姿态读取失败会隐藏已有骨架而不重连实时画面', async ({
   let poseRequests = 0
   await page.route('**://*/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
+    if (await fulfillPluginApi(route, path)) {
+      return
+    }
     if (path === '/api/cameras') {
       await fulfillJson(route, cameraCatalog())
       return
@@ -352,6 +463,9 @@ test('骨架按 object-contain 的实际相机像素区域绘制', async ({ page
   await page.setViewportSize({ width: 1400, height: 900 })
   await page.route('**://*/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
+    if (await fulfillPluginApi(route, path)) {
+      return
+    }
     if (path === '/api/cameras') {
       await fulfillJson(route, cameraCatalog())
       return
@@ -590,7 +704,20 @@ function visualPosePlugin() {
     capabilities: ['frame_consumer', 'pose_tracking', 'vision_analysis'],
     ui_kind: 'visual-pose-analysis',
     state: 'running',
+    enabled: true,
+    lifecycle_controllable: true,
     error: null,
     reloadable: true,
+    camera_binding: sharedCameraBinding(),
+  }
+}
+
+function sharedCameraBinding() {
+  return {
+    mode: 'shared_single_source',
+    camera_ids: ['sim-camera'],
+    minimum_sources: 1,
+    maximum_sources: 1,
+    state: 'satisfied',
   }
 }

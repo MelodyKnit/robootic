@@ -8,14 +8,17 @@ from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, StrictStr, validator
+from pydantic import BaseModel, Field, StrictBool, StrictStr, validator
 
 from gripper_ai_controller.bootstrap.preview_builder import VisionPreviewConfig
 from gripper_ai_controller.configuration import SafetyLimits
+from gripper_ai_controller.core.components import CameraBinding, CameraBindingRequirement
 from gripper_ai_controller.core.plugin_host import (
     PluginFactoryDescriptor,
+    PluginDisabledError,
     PluginHost,
     PluginHostError,
+    PluginLifecycleInProgressError,
     PluginReloadFailedError,
     PluginReloadInProgressError,
     PluginReloadNotAllowedError,
@@ -26,6 +29,7 @@ from gripper_ai_controller.domain.models import (
     CameraDeviceDescriptor,
     CameraParameter,
     CameraParameterApplyMode,
+    ComponentManifest,
     RuntimeMode,
 )
 from gripper_ai_controller.domain.ports import CameraParameterError
@@ -37,11 +41,13 @@ from gripper_ai_controller.pose.models import (
     PoseMotion2D,
 )
 from gripper_ai_controller.pose.tracker import PoseTargetError
+from gripper_ai_controller.object_detection.tracker import UnknownDetectionModelError
 from gripper_ai_controller.services.safety import SafetyPolicy
 from gripper_ai_controller.vision.models import VisionAnalysisSnapshot
 from gripper_ai_controller.web.config_store import (
     CameraParameterConfigStore,
     CameraSelectionConfigStore,
+    PluginLifecycleConfigStore,
 )
 from gripper_ai_controller.web.gripper_api import install_gripper_routes
 from gripper_ai_controller.web.gripper_service import ManualGripperControlService
@@ -50,6 +56,8 @@ from gripper_ai_controller.web.jaka_service import ManualJakaControlService
 from gripper_ai_controller.web.models import (
     CameraCatalogSnapshot,
     CameraPreviewStatus,
+    ObjectDetectionPreviewSnapshot,
+    ObjectPosePreviewSnapshot,
     PosePreviewSnapshot,
 )
 from gripper_ai_controller.web.service import (
@@ -64,6 +72,9 @@ from gripper_ai_controller.web.service import (
     CameraSelectionDisabledError,
     CameraSelectionOperationError,
     CameraSelectionPersistenceError,
+    DetectionModelUnavailableError,
+    PluginLifecycleControlsDisabledError,
+    PluginLifecyclePersistenceError,
     PoseTargetPersistenceError,
     PoseTrackingCapabilityError,
 )
@@ -73,6 +84,38 @@ _PREVIEW_PLUGIN_FACTORIES = {
     "visual-pose-analysis": (
         "gripper_ai_controller.plugins.visual_pose_analysis",
         "build_visual_pose_analysis_plugin",
+        ComponentManifest(
+            "visual-pose-analysis",
+            "0.1.0",
+            "plugin",
+            ("frame-observer", "pose-tracking", "vision-analysis"),
+            "build_visual_pose_analysis_plugin",
+        ),
+        "visual-pose-analysis",
+    ),
+    "object-pose-analysis": (
+        "gripper_ai_controller.plugins.object_pose_analysis",
+        "build_object_pose_analysis_plugin",
+        ComponentManifest(
+            "object-pose-analysis",
+            "0.1.0",
+            "plugin",
+            ("frame-observer", "object-pose", "plane-calibration"),
+            "build_object_pose_analysis_plugin",
+        ),
+        "object-pose-analysis",
+    ),
+    "object-detection-analysis": (
+        "gripper_ai_controller.plugins.object_detection_analysis",
+        "build_object_detection_analysis_plugin",
+        ComponentManifest(
+            "object-detection-analysis",
+            "0.1.0",
+            "plugin",
+            ("frame-observer", "object-detection", "bounding-boxes"),
+            "build_object_detection_analysis_plugin",
+        ),
+        "object-detection-analysis",
     ),
 }
 
@@ -239,6 +282,128 @@ class PoseTrackingResponse(BaseModel):
     overlay_fresh: bool
 
 
+class ObjectPoseImagePointResponse(BaseModel):
+    """A normalized image point used by a known-workpiece overlay."""
+
+    x: float
+    y: float
+
+
+class ObjectPosePixelPointResponse(BaseModel):
+    """A source-image pixel coordinate retained for operator diagnostics only."""
+
+    x: float
+    y: float
+
+
+class ObjectPoseBoundingBoxResponse(BaseModel):
+    """A normalized known-workpiece bounding box."""
+
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+class ObjectTranslationResponse(BaseModel):
+    """A calibrated JAKA-base position in millimetres with no command semantics."""
+
+    x: float
+    y: float
+    z: float
+
+
+class ObjectOrientationRpyResponse(BaseModel):
+    """Fixed-plane derived RPY values in radians."""
+
+    roll: float
+    pitch: float
+    yaw: float
+
+
+class ObjectPoseResponse(BaseModel):
+    """One safe known-workpiece output; no grasp target is part of this schema."""
+
+    profile_id: str
+    confidence: float
+    bounding_box: ObjectPoseBoundingBoxResponse
+    contour: List[ObjectPoseImagePointResponse]
+    pixel_center: Optional[ObjectPosePixelPointResponse]
+    normalized_center: ObjectPoseImagePointResponse
+    coordinate_frame: str
+    translation_mm: Optional[ObjectTranslationResponse]
+    orientation_rpy_rad: Optional[ObjectOrientationRpyResponse]
+    observed_dof: List[str]
+    derived_dof: List[str]
+    yaw_period_rad: Optional[float]
+    orientation_defined: bool
+    warning: Optional[str]
+
+
+class ObjectPoseTrackingResponse(BaseModel):
+    """Cached passive known-workpiece analysis for one configured camera."""
+
+    camera_id: str
+    enabled: bool
+    captured_at: Optional[float]
+    latest_frame_at: Optional[float]
+    overlay_fresh: bool
+    valid: bool
+    reason: str
+    inference_latency_ms: Optional[float]
+    objects: List[ObjectPoseResponse]
+
+
+class ObjectDetectionModelResponse(BaseModel):
+    """One configured model without its local file path or provider internals."""
+
+    model_id: str
+    display_name: str
+    provider: str
+    available: bool
+    selected: bool
+
+
+class ObjectDetectionResponse(BaseModel):
+    """One normalized semantic bounding box safe for Canvas rendering."""
+
+    detection_id: str
+    label: str
+    class_id: Optional[int]
+    confidence: float
+    bounding_box: ObjectPoseBoundingBoxResponse
+
+
+class ObjectDetectionTrackingResponse(BaseModel):
+    """Cached passive semantic detections for one configured camera."""
+
+    camera_id: str
+    enabled: bool
+    selected_model_id: Optional[str]
+    models: List[ObjectDetectionModelResponse]
+    captured_at: Optional[float]
+    latest_frame_at: Optional[float]
+    overlay_fresh: bool
+    valid: bool
+    reason: str
+    inference_latency_ms: Optional[float]
+    detections: List[ObjectDetectionResponse]
+
+
+class ObjectDetectionModelSelectionRequest(BaseModel):
+    """Select one model identifier already declared by local configuration."""
+
+    model_id: StrictStr = Field(..., min_length=1)
+
+    @validator("model_id")
+    def reject_blank_model_id(cls, value: str) -> str:
+        """Reject whitespace-only IDs through the normal 422 response contract."""
+
+        if not value.strip():
+            raise ValueError("model_id must contain a non-whitespace character")
+        return value
+
+
 class PoseTargetRequest(BaseModel):
     """One browser-selected COCO joint persisted only to the explicit local configuration."""
 
@@ -294,6 +459,16 @@ class VisionAnalysisResponse(BaseModel):
     visible_joint_names: List[str]
 
 
+class PluginCameraBindingResponse(BaseModel):
+    """Read-only logical camera-source binding for one passive preview plugin."""
+
+    mode: str
+    camera_ids: List[str]
+    minimum_sources: int
+    maximum_sources: Optional[int]
+    state: str
+
+
 class PluginStatusResponse(BaseModel):
     """Browser-safe lifecycle metadata for one configured preview plugin."""
 
@@ -305,6 +480,9 @@ class PluginStatusResponse(BaseModel):
     state: str
     error: Optional[str]
     reloadable: bool
+    enabled: bool
+    lifecycle_controllable: bool
+    camera_binding: Optional[PluginCameraBindingResponse]
 
 
 class PluginListResponse(BaseModel):
@@ -319,6 +497,12 @@ class PluginReloadRequest(BaseModel):
     plugin_ids: List[StrictStr] = Field(default_factory=list)
 
 
+class PluginActivationRequest(BaseModel):
+    """Replace one configured passive plugin's desired enabled state."""
+
+    enabled: StrictBool
+
+
 def create_web_app(
     preview_config: VisionPreviewConfig,
     frontend_dist_dir: Optional[str] = None,
@@ -331,13 +515,15 @@ def create_web_app(
     if preview_config.settings.plugin_reload_enabled and preview_config.runtime_mode != RuntimeMode.DEVELOPMENT:
         raise ValueError("Browser plugin reload requires a development preview configuration.")
     if (
-        preview_config.settings.gripper_controls_enabled
+        preview_config.settings.camera_controls_enabled
+        or preview_config.settings.gripper_controls_enabled
         or preview_config.settings.jaka_controls_enabled
         or preview_config.settings.plugin_reload_enabled
+        or preview_config.settings.plugin_lifecycle_controls_enabled
         or preview_config.camera_selection_settings.enabled
     ) and preview_config.settings.bind_host != "127.0.0.1":
         raise ValueError(
-            "Browser hardware controls, camera selection, and plugin reload require a 127.0.0.1 preview configuration."
+            "Browser camera parameters and controls, camera selection, plugin reload, and plugin lifecycle changes require a 127.0.0.1 preview configuration."
         )
     if preview_config.pose_settings.enabled:
         preflight = inspect_cuda_gpu()
@@ -368,6 +554,19 @@ def create_web_app(
                 preview_config.vision_name,
                 preview_config.vision_adapter_settings,
             )
+        plugin_lifecycle_store = None
+        if preview_config.settings.plugin_lifecycle_controls_enabled:
+            if preview_config.config_file is None or preview_config.vision_name is None:
+                raise ValueError(
+                    "Plugin lifecycle controls require an explicit local JSON configuration file."
+                )
+            plugin_lifecycle_store = PluginLifecycleConfigStore(
+                preview_config.config_file,
+                preview_config.camera_id,
+                preview_config.vision_name,
+                preview_config.preview_plugin_names,
+                preview_config.vision_adapter_settings,
+            )
         pose_target_store = None
         if preview_config.pose_settings.enabled:
             if preview_config.config_file is not None and preview_config.vision_name is not None:
@@ -386,6 +585,7 @@ def create_web_app(
             parameter_store=parameter_store,
             pose_target_store=pose_target_store,
             plugin_host=plugin_host,
+            plugin_lifecycle_store=plugin_lifecycle_store,
             camera_selection_settings=preview_config.camera_selection_settings,
             camera_selection_store=camera_selection_store,
         )
@@ -527,7 +727,12 @@ def create_web_app(
         host = service.plugin_host
         if host is None:
             return {"plugins": []}
-        return {"plugins": [_plugin_status_response(status) for status in await host.statuses()]}
+        return {
+            "plugins": [
+                _plugin_status_response(status, service.plugin_lifecycle_controls_enabled)
+                for status in await host.statuses()
+            ]
+        }
 
     @application.get("/api/plugins/{plugin_id}/status", response_model=PluginStatusResponse)
     async def plugin_status(plugin_id: str):
@@ -537,9 +742,50 @@ def create_web_app(
         if host is None:
             return _error_response(404, "plugin_not_found", "The requested plugin is not configured for preview.")
         try:
-            return _plugin_status_response(await host.status(plugin_id))
+            return _plugin_status_response(
+                await host.status(plugin_id), service.plugin_lifecycle_controls_enabled
+            )
         except UnknownPluginError:
             return _error_response(404, "plugin_not_found", "The requested plugin is not configured for preview.")
+
+    @application.put(
+        "/api/plugins/{plugin_id}/activation",
+        response_model=PluginStatusResponse,
+    )
+    async def update_plugin_activation(plugin_id: str, request: PluginActivationRequest):
+        """Replace one passive plugin's enabled state through the local lifecycle policy."""
+
+        try:
+            status = await service.set_plugin_enabled(plugin_id, request.enabled)
+        except PluginLifecycleControlsDisabledError:
+            return _error_response(
+                403,
+                "plugin_lifecycle_controls_disabled",
+                "Plugin enable and disable controls require an explicit local preview configuration.",
+            )
+        except UnknownPluginError:
+            return _error_response(404, "plugin_not_found", "The requested plugin is not configured for preview.")
+        except (PluginLifecycleInProgressError, PluginReloadInProgressError):
+            return _error_response(
+                409,
+                "plugin_lifecycle_in_progress",
+                "The requested plugin is already changing lifecycle state.",
+            )
+        except ValueError as error:
+            return _error_response(422, "invalid_plugin_activation_request", str(error))
+        except PluginLifecyclePersistenceError:
+            return _error_response(
+                503,
+                "plugin_lifecycle_persistence_failed",
+                "The plugin state could not be saved locally; the previous state was restored when possible.",
+            )
+        except PluginHostError:
+            return _error_response(
+                503,
+                "plugin_lifecycle_failed",
+                "The plugin could not complete the requested lifecycle change.",
+            )
+        return _plugin_status_response(status, service.plugin_lifecycle_controls_enabled)
 
     @application.post("/api/plugins/reload", response_model=PluginListResponse)
     async def reload_plugins(request: PluginReloadRequest):
@@ -568,6 +814,12 @@ def create_web_app(
                 "plugin_reload_in_progress",
                 "The requested plugin reload is already in progress.",
             )
+        except (PluginLifecycleInProgressError, PluginDisabledError):
+            return _error_response(
+                409,
+                "plugin_lifecycle_conflict",
+                "The requested plugin is disabled or changing lifecycle state.",
+            )
         except ValueError as error:
             return _error_response(422, "invalid_plugin_reload_request", str(error))
         except PluginReloadFailedError:
@@ -582,7 +834,12 @@ def create_web_app(
                 "plugin_reload_failed",
                 "The plugin host is temporarily unavailable for reload.",
             )
-        return {"plugins": [_plugin_status_response(status) for status in statuses]}
+        return {
+            "plugins": [
+                _plugin_status_response(status, service.plugin_lifecycle_controls_enabled)
+                for status in statuses
+            ]
+        }
 
     @application.get("/api/cameras/{camera_id}/status", response_model=CameraStatusResponse)
     async def camera_status(camera_id: str):
@@ -692,6 +949,62 @@ def create_web_app(
         if unknown is not None:
             return unknown
         return _vision_analysis_response(await service.get_vision_analysis_snapshot())
+
+    @application.get(
+        "/api/cameras/{camera_id}/objects",
+        response_model=ObjectPoseTrackingResponse,
+    )
+    async def camera_objects(camera_id: str):
+        """Return cached known-workpiece metadata without capture, inference, or device work."""
+
+        unknown = _unknown_camera_response(camera_id, service.camera_id)
+        if unknown is not None:
+            return unknown
+        return _object_pose_response(await service.get_object_pose_preview_snapshot())
+
+    @application.get(
+        "/api/cameras/{camera_id}/detections",
+        response_model=ObjectDetectionTrackingResponse,
+    )
+    async def camera_detections(camera_id: str):
+        """Return cached semantic boxes without capture, inference, or hardware work."""
+
+        unknown = _unknown_camera_response(camera_id, service.camera_id)
+        if unknown is not None:
+            return unknown
+        preview = await service.get_object_detection_preview_snapshot()
+        profiles = await service.get_object_detection_model_profiles()
+        return _object_detection_response(preview, profiles)
+
+    @application.put(
+        "/api/cameras/{camera_id}/detections/model-selection",
+        response_model=ObjectDetectionTrackingResponse,
+    )
+    async def select_detection_model(
+        camera_id: str, request: ObjectDetectionModelSelectionRequest
+    ):
+        """Switch only among configured passive models and clear prior boxes."""
+
+        unknown = _unknown_camera_response(camera_id, service.camera_id)
+        if unknown is not None:
+            return unknown
+        try:
+            await service.select_object_detection_model(request.model_id)
+        except UnknownDetectionModelError:
+            return _error_response(
+                404,
+                "detection_model_not_found",
+                "The requested object detection model is not configured.",
+            )
+        except DetectionModelUnavailableError:
+            return _error_response(
+                409,
+                "detection_model_unavailable",
+                "The requested object detection model is not available in localstore.",
+            )
+        preview = await service.get_object_detection_preview_snapshot()
+        profiles = await service.get_object_detection_model_profiles()
+        return _object_detection_response(preview, profiles)
 
     @application.post(
         "/api/cameras/{camera_id}/parameters/apply",
@@ -816,25 +1129,75 @@ def _build_preview_plugin_host(preview_config: VisionPreviewConfig) -> PluginHos
         factory = _PREVIEW_PLUGIN_FACTORIES.get(plugin_id)
         if factory is None:
             raise ValueError("Unsupported preview plugin: {0}".format(plugin_id))
-        module_name, factory_name = factory
+        module_name, factory_name, manifest, ui_kind = factory
         descriptors.append(
             PluginFactoryDescriptor(
                 plugin_id=plugin_id,
                 module_name=module_name,
                 factory_name=factory_name,
-                factory_kwargs={
-                    "camera_id": preview_config.camera_id,
-                    "pose_settings": preview_config.pose_settings,
-                    "vision_analysis_settings": preview_config.vision_analysis_settings,
-                },
+                factory_kwargs=_preview_plugin_factory_kwargs(plugin_id, preview_config),
+                manifest=manifest,
+                ui_kind=ui_kind,
+                camera_binding_requirement=_preview_plugin_camera_requirement(plugin_id),
+                camera_binding=CameraBinding((preview_config.camera_id,)),
             )
         )
-    return PluginHost(descriptors, reload_enabled=preview_config.settings.plugin_reload_enabled)
+    return PluginHost(
+        descriptors,
+        reload_enabled=preview_config.settings.plugin_reload_enabled,
+        enabled_plugin_ids=preview_config.preview_plugin_enabled,
+    )
 
 
-def _plugin_status_response(status: PluginStatus) -> Dict[str, Any]:
+def _preview_plugin_factory_kwargs(
+    plugin_id: str, preview_config: VisionPreviewConfig
+) -> Dict[str, object]:
+    """Supply only each trusted plugin's declared passive dependencies."""
+
+    if plugin_id == "visual-pose-analysis":
+        return {
+            "camera_id": preview_config.camera_id,
+            "pose_settings": preview_config.pose_settings,
+            "vision_analysis_settings": preview_config.vision_analysis_settings,
+        }
+    if plugin_id == "object-pose-analysis":
+        return {
+            "camera_id": preview_config.camera_id,
+            "workpiece_pose_settings": preview_config.workpiece_pose_settings,
+        }
+    if plugin_id == "object-detection-analysis":
+        return {
+            "camera_id": preview_config.camera_id,
+            "object_detection_settings": preview_config.object_detection_settings,
+        }
+    raise ValueError("Unsupported preview plugin: {0}".format(plugin_id))
+
+
+def _preview_plugin_camera_requirement(plugin_id: str) -> CameraBindingRequirement:
+    """Declare the current shared preview input for every registered visual plugin."""
+
+    if plugin_id not in _PREVIEW_PLUGIN_FACTORIES:
+        raise ValueError("Unsupported preview plugin: {0}".format(plugin_id))
+    return CameraBindingRequirement.shared_single_source()
+
+
+def _plugin_status_response(
+    status: PluginStatus, lifecycle_controllable: bool
+) -> Dict[str, Any]:
     """Map host state to the browser's compact dynamic-plugin resource schema."""
 
+    camera_binding = None
+    requirement = status.camera_binding_requirement
+    if requirement.requires_camera:
+        camera_binding = {
+            "mode": requirement.mode,
+            "camera_ids": list(status.camera_binding.camera_ids),
+            "minimum_sources": requirement.minimum_sources,
+            "maximum_sources": requirement.maximum_sources,
+            "state": "satisfied"
+            if status.camera_binding.satisfies(requirement)
+            else "unbound",
+        }
     return {
         "plugin_id": status.plugin_id,
         "name": status.name,
@@ -844,6 +1207,9 @@ def _plugin_status_response(status: PluginStatus) -> Dict[str, Any]:
         "state": status.lifecycle_state,
         "error": status.error,
         "reloadable": status.reloadable,
+        "enabled": status.enabled,
+        "lifecycle_controllable": lifecycle_controllable,
+        "camera_binding": camera_binding,
     }
 
 
@@ -1053,6 +1419,109 @@ def _vision_analysis_response(snapshot: VisionAnalysisSnapshot):
             for joint in snapshot.joint_visibility
         ],
         "visible_joint_names": list(snapshot.visible_joint_names),
+    }
+
+
+def _object_pose_response(preview: ObjectPosePreviewSnapshot):
+    """Serialize cached plane-constrained workpiece metadata without a grasp target."""
+
+    snapshot = preview.snapshot
+    return {
+        "camera_id": snapshot.camera_id,
+        "enabled": snapshot.enabled,
+        "captured_at": snapshot.captured_at,
+        "latest_frame_at": preview.latest_frame_at,
+        "overlay_fresh": preview.overlay_fresh,
+        "valid": snapshot.valid,
+        "reason": snapshot.reason,
+        "inference_latency_ms": snapshot.inference_latency_ms,
+        "objects": [_workpiece_pose_response(object_pose) for object_pose in snapshot.objects],
+    }
+
+
+def _object_detection_response(preview: ObjectDetectionPreviewSnapshot, profiles):
+    """Serialize normalized semantic boxes and the configured model catalog."""
+
+    snapshot = preview.snapshot
+    models = [
+        {
+            "model_id": profile.model_id,
+            "display_name": profile.display_name,
+            "provider": profile.provider_id,
+            "available": Path(profile.model_path).is_file(),
+            "selected": profile.model_id == snapshot.selected_model_id,
+        }
+        for profile in profiles
+    ]
+    detections = []
+    for index, detection in enumerate(snapshot.detections):
+        captured_key = "none" if snapshot.captured_at is None else "{0:.6f}".format(snapshot.captured_at)
+        detections.append(
+            {
+                "detection_id": "{0}-{1}".format(captured_key, index),
+                "label": detection.label,
+                "class_id": detection.class_id,
+                "confidence": detection.confidence,
+                "bounding_box": {
+                    "x": detection.bounding_box.x,
+                    "y": detection.bounding_box.y,
+                    "width": detection.bounding_box.width,
+                    "height": detection.bounding_box.height,
+                },
+            }
+        )
+    return {
+        "camera_id": snapshot.camera_id,
+        "enabled": snapshot.enabled,
+        "selected_model_id": snapshot.selected_model_id,
+        "models": models,
+        "captured_at": snapshot.captured_at,
+        "latest_frame_at": preview.latest_frame_at,
+        "overlay_fresh": preview.overlay_fresh,
+        "valid": snapshot.valid,
+        "reason": snapshot.reason,
+        "inference_latency_ms": snapshot.inference_latency_ms,
+        "detections": detections,
+    }
+
+
+def _workpiece_pose_response(object_pose):
+    """Map one internal result to the stable browser schema without exposing calibration internals."""
+
+    return {
+        "profile_id": object_pose.profile_id,
+        "confidence": object_pose.confidence,
+        "bounding_box": {
+            "x": object_pose.bounding_box.x,
+            "y": object_pose.bounding_box.y,
+            "width": object_pose.bounding_box.width,
+            "height": object_pose.bounding_box.height,
+        },
+        "contour": [{"x": point.x, "y": point.y} for point in object_pose.contour],
+        "pixel_center": {
+            "x": object_pose.pixel_center.x,
+            "y": object_pose.pixel_center.y,
+        },
+        "normalized_center": {
+            "x": object_pose.normalized_center.x,
+            "y": object_pose.normalized_center.y,
+        },
+        "coordinate_frame": object_pose.coordinate_frame,
+        "translation_mm": {
+            "x": object_pose.translation_mm.x_mm,
+            "y": object_pose.translation_mm.y_mm,
+            "z": object_pose.translation_mm.z_mm,
+        },
+        "orientation_rpy_rad": {
+            "roll": object_pose.orientation_rpy_rad.roll_rad,
+            "pitch": object_pose.orientation_rpy_rad.pitch_rad,
+            "yaw": object_pose.orientation_rpy_rad.yaw_rad,
+        },
+        "observed_dof": list(object_pose.observed_dof),
+        "derived_dof": list(object_pose.derived_dof),
+        "yaw_period_rad": object_pose.yaw_period_rad,
+        "orientation_defined": object_pose.orientation_defined,
+        "warning": object_pose.warning,
     }
 
 

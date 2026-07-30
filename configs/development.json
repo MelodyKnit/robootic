@@ -16,7 +16,9 @@
         "audit"
       ],
       "preview": [
-        "visual-pose-analysis"
+        "visual-pose-analysis",
+        "object-pose-analysis",
+        "object-detection-analysis"
       ]
     }
   },
@@ -26,6 +28,38 @@
   },
   "camera_parameters": {
     "pixel_format": "RGB8"
+  },
+  "object_detection": {
+    "enabled": false,
+    "selected_model_id": "fasterrcnn-coco-local",
+    "max_analysis_fps": 2,
+    "overlay_max_frame_lag_seconds": 0.5,
+    "models": [
+      {
+        "model_id": "fasterrcnn-coco-local",
+        "display_name": "Faster R-CNN COCO（本地权重）",
+        "provider": "torchvision-faster-rcnn-resnet50-fpn",
+        "model_path": "localstore/models/fasterrcnn_resnet50_fpn_coco.pth",
+        "device": "cpu",
+        "allowed_labels": [],
+        "confidence_threshold": 0.5,
+        "inference_max_side": 960,
+        "max_detections": 30
+      },
+      {
+        "model_id": "yolo-world-tools-local",
+        "display_name": "YOLO-World 工件提示（本地 ONNX）",
+        "provider": "yolo-world-onnx-opencv",
+        "model_path": "localstore/models/yolo-world-tools.onnx",
+        "class_names": ["wrench", "pliers", "screwdriver"],
+        "input_size": [640, 640],
+        "output_format": "official-nms",
+        "backend": "cpu",
+        "confidence_threshold": 0.25,
+        "nms_iou_threshold": 0.45,
+        "max_detections": 30
+      }
+    ]
   },
   "targets": [
     {
@@ -46,7 +80,7 @@
     "maximum_perception_age_seconds": 2.0
   },
   "web": {
-    "bind_host": "0.0.0.0",
+    "bind_host": "127.0.0.1",
     "port": 8000,
     "frontend_dist_dir": "src/web/dist",
     "stream_fps": 10,
@@ -54,6 +88,7 @@
     "capture_retry_seconds": 1.0,
     "camera_controls_enabled": true,
     "gripper_controls_enabled": false,
-    "plugin_reload_enabled": false
+    "plugin_reload_enabled": false,
+    "plugin_lifecycle_controls_enabled": false
   }
 }

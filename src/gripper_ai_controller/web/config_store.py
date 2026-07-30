@@ -22,6 +22,10 @@ class CameraSelectionConfigStoreError(RuntimeError):
     """Report a rejected local camera-selection persistence operation."""
 
 
+class PluginLifecycleConfigStoreError(RuntimeError):
+    """Report a rejected local preview-plugin lifecycle persistence operation."""
+
+
 class CameraParameterConfigStore:
     """Persist normalized settings only to the JSON file selected by the CLI caller.
 
@@ -230,3 +234,107 @@ class CameraSelectionConfigStore(CameraParameterConfigStore):
                 "The selected camera could not be saved to the local configuration."
             ) from error
         return device_id
+
+
+class PluginLifecycleConfigStore(CameraParameterConfigStore):
+    """Persist enabled preview plugins only to the explicit local configuration file.
+
+    ``components.plugins.preview`` stays a versioned, trusted availability list. This
+    store owns the mutable ``plugin_runtime.enabled`` map, so a browser refresh or a
+    later service restart uses the operator's last deliberate enable/disable choice
+    without allowing the browser to add module identifiers or import locations.
+    """
+
+    def __init__(
+        self,
+        config_file: str,
+        camera_id: str,
+        vision_name: str,
+        preview_plugin_ids,
+        vision_adapter_settings: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """Bind plugin state writes to one verified local JSON configuration document."""
+
+        super().__init__(config_file, camera_id, vision_name, vision_adapter_settings)
+        if not isinstance(preview_plugin_ids, (tuple, list)) or not preview_plugin_ids:
+            raise ValueError("preview_plugin_ids must be a non-empty sequence.")
+        if any(not isinstance(plugin_id, str) or not plugin_id for plugin_id in preview_plugin_ids):
+            raise ValueError("preview_plugin_ids must contain non-empty strings.")
+        if len(set(preview_plugin_ids)) != len(preview_plugin_ids):
+            raise ValueError("preview_plugin_ids must not contain duplicates.")
+        self.preview_plugin_ids = tuple(preview_plugin_ids)
+        try:
+            resolved_config_file = self.config_file.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise PluginLifecycleConfigStoreError(
+                "Plugin lifecycle persistence requires an existing local configuration."
+            ) from error
+        if not any(part.lower() == "localstore" for part in resolved_config_file.parent.parts):
+            raise PluginLifecycleConfigStoreError(
+                "Plugin lifecycle persistence requires a configuration under localstore."
+            )
+        self.config_file = resolved_config_file
+
+    def persist_enabled(self, plugin_id: str, enabled: bool) -> Dict[str, bool]:
+        """Atomically write the complete trusted enabled map after one valid selection."""
+
+        if plugin_id not in self.preview_plugin_ids:
+            raise PluginLifecycleConfigStoreError(
+                "The requested plugin is not configured for this preview."
+            )
+        if type(enabled) is not bool:
+            raise PluginLifecycleConfigStoreError("Plugin enabled state must be a boolean.")
+        try:
+            payload = self._load_payload()
+            self._validate_preview_plugin_ids(payload)
+            enabled_states = self._read_enabled_states(payload)
+            enabled_states[plugin_id] = enabled
+            payload["plugin_runtime"] = {"enabled": enabled_states}
+            self._write_atomically(payload)
+            return dict(enabled_states)
+        except PluginLifecycleConfigStoreError:
+            raise
+        except (CameraParameterConfigStoreError, OSError, ValueError) as error:
+            raise PluginLifecycleConfigStoreError(
+                "The selected plugin state could not be saved to the local configuration."
+            ) from error
+
+    def _validate_preview_plugin_ids(self, payload: Mapping[str, Any]) -> None:
+        """Reject a file externally changed to describe a different preview module set."""
+
+        try:
+            components = payload["components"]
+            plugins = components.get("plugins", {})
+            configured = plugins.get("preview")
+        except (AttributeError, KeyError, TypeError) as error:
+            raise PluginLifecycleConfigStoreError(
+                "The configured plugin lifecycle file no longer describes this preview."
+            ) from error
+        if not isinstance(configured, list) or tuple(configured) != self.preview_plugin_ids:
+            raise PluginLifecycleConfigStoreError(
+                "The configured plugin lifecycle file no longer matches this preview plugin list."
+            )
+
+    def _read_enabled_states(self, payload: Mapping[str, Any]) -> Dict[str, bool]:
+        """Normalize a partial persisted map while retaining legacy all-enabled behavior."""
+
+        runtime = payload.get("plugin_runtime", {})
+        if not isinstance(runtime, Mapping) or set(runtime).difference({"enabled"}):
+            raise PluginLifecycleConfigStoreError("plugin_runtime must contain only enabled.")
+        configured = runtime.get("enabled", {})
+        if not isinstance(configured, Mapping):
+            raise PluginLifecycleConfigStoreError("plugin_runtime.enabled must be a JSON object.")
+        unknown = set(configured).difference(self.preview_plugin_ids)
+        if unknown:
+            raise PluginLifecycleConfigStoreError(
+                "plugin_runtime.enabled contains an unconfigured plugin."
+            )
+        result = {}  # type: Dict[str, bool]
+        for configured_plugin_id in self.preview_plugin_ids:
+            value = configured.get(configured_plugin_id, True)
+            if type(value) is not bool:
+                raise PluginLifecycleConfigStoreError(
+                    "plugin_runtime.enabled values must be booleans."
+                )
+            result[configured_plugin_id] = value
+        return result

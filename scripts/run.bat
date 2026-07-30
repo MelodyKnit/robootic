@@ -8,10 +8,32 @@ cd /d "%PROJECT_ROOT%"
 call scripts\check_poetry.bat
 if errorlevel 1 exit /b %ERRORLEVEL%
 
+if /I "%~1"=="--dev" (
+    set "DEV_MODE=1"
+    shift
+)
+
+set "CONFIG_PATH=configs/development.json"
+if exist "localstore\hikvision-web.local.json" (
+    set "CONFIG_PATH=localstore/hikvision-web.local.json"
+)
+
+if "%DEV_MODE%"=="1" (
+    echo [INFO] Running in DEVELOPMENT mode with config: %CONFIG_PATH%
+    echo [INFO] Running: poetry run python -m gripper_ai_controller web --config-file %CONFIG_PATH%
+    poetry run python -m gripper_ai_controller web --config-file %CONFIG_PATH%
+    exit /b %ERRORLEVEL%
+)
+
 if "%~1"=="" (
-    echo [ERROR] A CLI command is required.
-    echo [ERROR] Web startup also requires: --config-file ^<path^>
-    exit /b 1
+    set "CONFIG_PATH=configs/development.json"
+    if exist "localstore\hikvision-web.local.json" (
+        set "CONFIG_PATH=localstore/hikvision-web.local.json"
+    )
+    echo [INFO] Starting Web control with default config: %CONFIG_PATH%
+    echo [INFO] Running: poetry run python -m gripper_ai_controller web --config-file %CONFIG_PATH%
+    poetry run python -m gripper_ai_controller web --config-file %CONFIG_PATH%
+    exit /b %ERRORLEVEL%
 )
 
 set "COMMAND_NAME=%~1"

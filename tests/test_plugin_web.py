@@ -22,7 +22,11 @@ from gripper_ai_controller.configuration import (
     WebPreviewSettings,
 )
 from gripper_ai_controller.cli import _web
-from gripper_ai_controller.core.components import Plugin
+from gripper_ai_controller.core.components import (
+    CameraBinding,
+    CameraBindingRequirement,
+    Plugin,
+)
 from gripper_ai_controller.core.plugin_host import PluginFactoryDescriptor, PluginHost
 from gripper_ai_controller.domain.models import ComponentManifest, ImageFrame, RuntimeMode
 from gripper_ai_controller.plugins.visual_pose_analysis import VisualPoseAnalysisPlugin
@@ -356,6 +360,8 @@ class PreviewPluginFrameRetentionTests(unittest.TestCase):
                         __name__,
                         "retained_frame_visual_plugin_factory",
                         {"camera_id": "camera-a"},
+                        camera_binding_requirement=CameraBindingRequirement.shared_single_source(),
+                        camera_binding=CameraBinding(("camera-a",)),
                     ),
                 )
             )
@@ -398,10 +404,21 @@ class PreviewPluginHttpTests(unittest.TestCase):
             self.assertEqual("visual-pose-analysis", plugin["ui_kind"])
             self.assertEqual("running", plugin["state"])
             self.assertTrue(plugin["reloadable"])
+            self.assertEqual(
+                {
+                    "mode": "shared_single_source",
+                    "camera_ids": ["camera-a"],
+                    "minimum_sources": 1,
+                    "maximum_sources": 1,
+                    "state": "satisfied",
+                },
+                plugin["camera_binding"],
+            )
 
             status = client.get("/api/plugins/visual-pose-analysis/status")
             self.assertEqual(200, status.status_code)
             self.assertEqual("running", status.json()["state"])
+            self.assertEqual(["camera-a"], status.json()["camera_binding"]["camera_ids"])
             self.assertEqual(404, client.get("/api/plugins/not-configured/status").status_code)
 
             frame = self._wait_for_frame(client)
@@ -434,6 +451,24 @@ class PreviewPluginHttpTests(unittest.TestCase):
             response = client.post("/api/plugins/reload", json={"plugin_ids": []})
             self.assertEqual(403, response.status_code)
             self.assertEqual("plugin_reload_disabled", response.json()["code"])
+
+    def test_disabled_visual_plugin_keeps_its_declared_camera_binding_visible(self):
+        """Let the workspace describe a disabled camera plugin without starting it."""
+
+        settings = WebPreviewSettings(bind_host="127.0.0.1", capture_retry_seconds=0.01)
+        application = create_web_app(
+            VisionPreviewConfig(
+                camera_id="camera-a",
+                vision=PreviewPluginTestVisionAdapter(),
+                settings=settings,
+                preview_plugin_enabled={"visual-pose-analysis": False},
+            )
+        )
+        with TestClient(application) as client:
+            plugin = client.get("/api/plugins").json()["plugins"][0]
+            self.assertEqual("disabled", plugin["state"])
+            self.assertEqual("shared_single_source", plugin["camera_binding"]["mode"])
+            self.assertEqual(["camera-a"], plugin["camera_binding"]["camera_ids"])
 
     @staticmethod
     def _application(plugin_reload_enabled):

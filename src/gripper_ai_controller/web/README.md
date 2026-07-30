@@ -1,6 +1,6 @@
 # 相机网页预览后端
 
-本包提供独立的 FastAPI 相机预览、受限相机参数和可选人工夹爪、JAKA 六轴控制服务。默认启动配置的 `VisionAdapter` 和网页预览 `PluginHost`，以单一采集循环获取帧、在内存中编码为 JPEG，并通过快照和 MJPEG 接口提供给浏览器。`visual-pose-analysis` Plugin 只消费 JPEG 发布后的帧事件，维护姿态与成像分析快照；采集、JPEG 编码、CUDA 姿态推理和质量诊断各自使用受限的单工作线程，每条慢路径最多保留一个正在处理项和一个可替换的最新待处理项。
+本包提供独立的 FastAPI 相机预览、受限相机参数和可选人工夹爪、JAKA 六轴控制服务。默认启动配置的 `VisionAdapter` 和网页预览 `PluginHost`，以单一采集循环获取帧、在内存中编码为 JPEG，并通过快照和 MJPEG 接口提供给浏览器。`visual-pose-analysis`、`object-pose-analysis` 与 `object-detection-analysis` Plugin 均只消费 JPEG 发布后的帧事件，分别维护人体姿态/成像分析、已知平放工件位姿和通用二维检测快照；采集、JPEG 编码及各分析路径使用受限工作线程，慢路径只保留一个正在处理项和一个可替换的最新待处理项。
 
 服务不会创建 `Runtime`、规划器、镜像目标或视觉运动链路，也不会将帧写入磁盘。默认配置不构造机器人或夹爪适配器；声明 `gripper_control` 或 `jaka_control` 后，才会分别构造其 `target_name` 选中的一个主设备及对应人工控制门面，以提供只读状态。只有本机配置明确开启对应网页控制开关后，人工门面才允许动作；它们不会启动自动规划、视觉跟随或运行时调度。
 
@@ -18,8 +18,12 @@
 - `GET /api/cameras/{camera_id}/pose/frame?captured_at={timestamp}`：返回该姿态结果对应的 JPEG 源图；`captured_at` 为 `/pose` 的浮点采集时间，成功时返回 `image/jpeg`、`Cache-Control: no-store` 和 `X-Camera-Captured-At`。它只读取最多三个已送入推理的内存 JPEG，不触发采集或推理；缓存尚未可用、已被淘汰或姿态未启用时返回 `503`、`pose_frame_unavailable`。
 - `PUT /api/cameras/{camera_id}/pose/target`：请求体为 `{ "target_joint": "right_wrist" }`，更新 COCO 关节选择并原子保存到显式本机配置。
 - `GET /api/cameras/{camera_id}/vision/analysis`：返回已缓存的成像质量、Keypoint R-CNN 已产生的人员框、主人体框、17 个关节可见性和失败原因；不会触发新的采集或推理。
-- `GET /api/plugins`：返回配置的网页预览 Plugin 清单、能力、生命周期状态、最近错误和重载可用性。
+- `GET /api/cameras/{camera_id}/objects`：返回已缓存的已知平放工件结果、画面新鲜度、有效性、拒绝原因和推理延迟；每个对象含归一化轮廓/框、像素中心、`jaka_base` 下的毫米位置、RPY、观测/推导自由度和偏航歧义。接口不会触发采集、推理、机器人或夹爪操作；禁用、空画面或无效标定均安全返回空对象列表。详细契约见 [工件位姿接口说明](../../../docs/object-pose-api.md)。
+- `GET /api/cameras/{camera_id}/detections`：返回已缓存的通用二维检测状态、当前进程选择的模型目录、画面新鲜度和归一化类别框。它不触发采集、推理或模型下载，也不返回抓取点、深度、位姿或机器人坐标。
+- `PUT /api/cameras/{camera_id}/detections/model-selection`：请求体为 `{ "model_id": "..." }`，只在已配置且本地文件存在的模型之间切换，清空旧模型框并返回同一快照结构。选择仅在当前服务进程会话内生效，不改写配置；详细契约见 [通用二维目标检测接口](../../../docs/object-detection-api.md)。
+- `GET /api/plugins`：返回配置的网页预览 Plugin 清单、能力、生命周期状态、最近错误和重载可用性；每项额外包含持久化运行态 `enabled`、当前请求是否允许网页启停的 `lifecycle_controllable`，以及只读 `camera_binding`。相机依赖 Plugin 的 `camera_binding` 含模式、逻辑来源 ID、最小/最大来源数和满足状态；无相机需求的 Plugin 返回 `null`。
 - `GET /api/plugins/{plugin_id}/status`：返回一个已配置网页 Plugin 的详细状态；未知标识返回 `404`。
+- `PUT /api/plugins/{plugin_id}/activation`：请求体为 `{ "enabled": true }` 或 `{ "enabled": false }`。它只接受已配置的稳定 Plugin ID，并在本机启停授权满足时原子写回显式 `localstore/` JSON 的 `plugin_runtime.enabled`。关闭只停止该 Plugin 的被动生命周期，绝不停止相机/MJPEG 或触发硬件动作；未配置的 ID 返回 `404`，未满足本机启停授权返回 `403`。
 - `POST /api/plugins/reload`：请求体为 `{ "plugin_ids": ["visual-pose-analysis"] }`；空列表表示重载全部已配置网页 Plugin。仅本机回环开发服务、且 `web.plugin_reload_enabled` 为真时可用；未授权为 `403`，重载进行中为 `409`，替换失败为 `503`。
 - `GET /api/grippers`：返回零或一个可人工控制夹爪的状态；控制未启用或未配置时列表为空。
 - `GET /api/grippers/{gripper_id}/status`：读取当前连接、初始化、运动、夹持、`target_position`、该值是否为实时反馈以及最近错误。
@@ -47,21 +51,33 @@ JAKA 接口同样使用 `{ "code", "message" }` 错误格式：控制未启用�
 
 成像分析响应包含 `frame`、`person_count`、`persons`、`selected_person`、`joint_visibility` 和 `visible_joint_names`。`frame` 只含尺寸、像素格式、亮度均值、对比度、拉普拉斯方差清晰度和非阻断警告；`persons` 直接复用最近一次 Keypoint R-CNN 推理中通过人体阈值的候选，不会加载第二个人体检测模型。姿态未启用时接口仍返回 `200`，并提供帧质量但 `pose_enabled: false`；未知相机继续返回 `404`。详情见 [视觉分析包说明](../vision/README.md)。
 
+通用检测响应包含 `enabled`、`selected_model_id`、`models`、`captured_at`、`latest_frame_at`、`overlay_fresh`、`valid`、`reason`、`inference_latency_ms` 和 `detections`。`models[].available` 只表示配置路径当前是本地文件，不等价于模型已经成功加载或通过现场验证。禁用、模型不可用、未收到帧、无检测或推理失败时返回安全空列表；前端只在 `overlay_fresh` 为真时绘制框。模型选择中的未知 ID 返回 `404 detection_model_not_found`，Plugin/功能禁用或模型文件缺失返回 `409 detection_model_unavailable`，空白或类型错误的 `model_id` 返回 `422`。GET 与 PUT 都不触发设备动作，PUT 也不持久化选择。
+
 ## 相机发现与选择边界
 
 `SelectableVisionAdapter` 是独立于取帧和参数控制的可选能力。网页只看到适配器生成的稳定不透明 ID、显示名称、型号、传输类型、选中状态和是否具有标定映射；厂商序列号、SDK 结构和客户端对象不会进入 HTTP 响应。发现失败只附加到目录响应，不会中断当前已工作的画面。
 
-网页服务仍只有一个逻辑 `camera_id`、一个采集循环和一个 `FrameHub`。切换设备时，服务先阻止新的采集和 Plugin 帧投递，再关闭旧设备、配置并打开新设备、恢复已授权参数、清空旧 JPEG、姿态、运动基线和成像质量缓存，最后原子写回显式 `localstore/` 配置作为提交点。写入已开始时会屏蔽协程取消并等待真实结果：成功则保留新设备，失败则恢复旧设备，避免运行态与下次启动配置不一致。浏览器始终保持同一个 MJPEG URL，服务也绝不同时打开两台相机。
+网页服务仍只有一个逻辑 `camera_id`、一个采集循环和一个 `FrameHub`。切换设备时，服务先阻止新的采集和 Plugin 帧投递，再关闭旧设备、配置并打开新设备、恢复已授权参数、清空旧 JPEG、姿态、运动基线、成像质量、已知工件和通用检测缓存，最后原子写回显式 `localstore/` 配置作为提交点。写入已开始时会屏蔽协程取消并等待真实结果：成功则保留新设备，失败则恢复旧设备，避免运行态与下次启动配置不一致。浏览器始终保持同一个 MJPEG URL，服务也绝不同时打开两台相机。
 
 相机选择必须同时满足 `camera_selection.enabled: true`、配置文件位于 `localstore/`、服务绑定 `127.0.0.1`。网页参数写入仍由独立的 `web.camera_controls_enabled` 控制；开启选择不会自动开放曝光等参数写入。新设备没有 `camera_selection.calibration_ids` 映射时只允许预览和 2D 视觉结果，不能声称已获得机器人基座坐标标定。
 
+左侧每个声明相机输入的 Plugin 详情中的下拉框与右侧相机适配器面板使用同一个 `CameraCatalog` 和选择接口。它便于从 Plugin 上下文确认当前输入，但不是 Plugin 私有绑定；任何一处成功切换都会改变中央 MJPEG 和全部分析模块的共享输入。Plugin 绑定使用逻辑 `camera_id`，物理设备 `device_id` 只属于相机适配器选择层；详细约束见 [插件相机绑定](../../../docs/plugin-camera-binding.md)。
+
 ## 网页预览 Plugin 边界
 
-网页预览只从 `components.plugins.preview` 加载已注册的稳定组件标识符，浏览器请求不能提供模块路径或工厂名称。当前受信任注册表只包含 `visual-pose-analysis`；新增 Plugin 必须先在服务端注册固定工厂，不能仅改写配置。Plugin 列表接口返回稳定 ID、名称、版本、能力、`ui_kind`、生命周期状态、最近错误和重载能力；已注册但尚无专用面板的模块只显示状态卡，绝不生成动态设备控制表单。
+网页预览只从 `components.plugins.preview` 加载已注册的稳定组件标识符，浏览器请求不能提供模块路径或工厂名称。当前受信任注册表包含 `visual-pose-analysis`、`object-pose-analysis` 与 `object-detection-analysis`；新增 Plugin 必须先在服务端注册固定工厂，不能仅改写配置。Plugin 列表接口返回稳定 ID、名称、版本、能力、`ui_kind`、生命周期状态、最近错误、重载能力、`enabled`、`lifecycle_controllable` 和只读 `camera_binding`；已注册但尚无专用结果面板、但声明相机输入的模块仍会显示通用相机输入面板，绝不生成动态设备控制表单。
+
+可用清单和运行态分离：`components.plugins.preview` 确定可加载的稳定 ID，显式 `localstore/` JSON 根对象 `plugin_runtime.enabled` 才保存每个 ID 的严格布尔启停状态。缺失该对象或任一 ID 时，为兼容旧配置，已配置 Plugin 默认开启。刷新页面、重新建立 MJPEG 或调用 `GET /api/plugins` 都是只读操作，不能让已关闭的模块重新启动。
 
 `visual-pose-analysis` 只处理帧事件并公开只读姿态、人员检测与成像分析结果。它不导入相机 SDK、不持有相机、夹爪或 JAKA 适配器，也不能调用人工控制服务。Plugin 重载会暂停该模块的新帧投递，等待其工作完成后原子替换；若新实例启动失败，旧实例继续运行。整个过程中 JPEG 缓存、MJPEG URL 和相机采集循环保持不变。
 
-重载仅在 `runtime_mode` 为 `development`、`web.bind_host` 严格为 `127.0.0.1` 且 `web.plugin_reload_enabled` 为 `true` 时开放。生产模式必须停止并重启服务以加载 Plugin 更新；任何非回环地址均拒绝网页重载，避免无认证网络服务装载更新。
+`object-pose-analysis` 只处理帧事件并公开已知单工件的只读平面位姿结果。它使用背景差分、轮廓与离线标定数据，直接观测 `X/Y/Yaw`，仅基于台面与工件档案推导 `Z/Roll/Pitch`；它不宣称输出任意物体的真实 6D 位姿。该 Plugin 不导入相机 SDK、不持有相机、夹爪或 JAKA 适配器，也不能调用人工控制服务。人体姿态 Plugin 是否启用不影响该 Plugin 的运行、重置或热重载；相机切换、标定失效、粘连、遮挡、背景不匹配和偏航歧义会安全拒绝结果而不是生成抓取位姿。标定流程与本机数据边界见 [工件平面位姿标定说明](../../../docs/object-pose-calibration.md)。
+
+`object-detection-analysis` 只处理帧事件并公开通用二维语义框。它支持显式本地 Faster R-CNN 权重，以及通过 OpenCV DNN 加载、类别提示在导出前固化的 YOLO-World ONNX；不会接收浏览器自由文本提示，也不会自动下载模型。其结果只适合画面标注和候选筛选，不能替代 `object-pose-analysis` 的标定坐标与平面位姿，更不能直接生成抓取或放置命令。模型选择仅当前服务进程会话有效，切换时清除旧框；重启或 Plugin 重载后恢复配置默认值。
+
+网页启停只在 `web.plugin_lifecycle_controls_enabled` 为 `true`、`web.bind_host` 严格为 `127.0.0.1` 且显式启动配置位于 `localstore/` 时开放。服务先完成受控的 Plugin 生命周期切换，再原子写入本机 JSON；写入失败时会尽力恢复之前的运行状态并返回失败。关闭 Plugin 只停止其被动分析和新帧投递；相机采集、JPEG 缓存、MJPEG、夹爪和 JAKA 适配器均不受影响，也不会因启停请求得到任何控制指令。
+
+重载仅在 `runtime_mode` 为 `development`、`web.bind_host` 严格为 `127.0.0.1` 且 `web.plugin_reload_enabled` 为 `true` 时开放。生产模式必须停止并重启服务以加载 Plugin 更新；任何非回环地址均拒绝网页重载，避免无认证网络服务装载更新。重载权限不自动授予网页启停权限，反之亦然。
 
 ## 夹爪控制边界
 
@@ -106,8 +122,8 @@ JAKA 接口同样使用 `{ "code", "message" }` 错误格式：控制未启用�
 先构建前端，再以显式配置启动：
 
 ```powershell
-pnpm --dir src/web build
-poetry run gripper-ai-controller web --config-file configs/development.json
+scripts\frontend.bat build
+scripts\run.bat web --config-file configs/development.json
 ```
 
 CLI 可用 `--host`、`--port` 和 `--frontend-dist-dir` 临时覆盖对应 `web` 配置；端口必须为 `1` 至 `65535`。未构建前端目录时，服务仍提供 `/api`，但不会提供根网页入口。
@@ -119,3 +135,5 @@ CLI 可用 `--host`、`--port` 和 `--frontend-dist-dir` 临时覆盖对应 `web
 使用真实海康相机时，从版本化模板复制本机配置到 `localstore/`，并确保官方 MVS SDK 已按项目文档复制到本机适配器目录。版本化配置、代码和接口文档不得包含真实相机序列号或采集帧。
 
 启用 `pose.enabled` 时，服务还会在创建相机采集循环前检查 NVIDIA 驱动、CUDA 11.7 Torch 构建和 `torch.cuda.is_available()`。检查失败会阻止服务启动，避免在无 GPU 的机器上无声回退到 CPU。模型权重必须由操作员使用显式 CLI 下载到 `localstore/`；服务本身不会下载权重。
+
+通用检测模型也不会由网页服务自动下载。操作者可在启动服务前运行 `scripts\run.bat object-detection-download-fasterrcnn`，显式安装并完整校验官方 Faster R-CNN COCO 权重；默认目标是 `localstore/models/fasterrcnn_resnet50_fpn_coco.pth`。YOLO-World ONNX 必须另行按导出契约准备，浏览器模型选择接口只在已有本地模型之间切换。
