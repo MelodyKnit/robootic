@@ -72,6 +72,13 @@ class JakaDryRunRobotAdapter(BaseAdapter, RobotAdapter):
             connected=False,
             powered=False,
             enabled=False,
+            joint_velocities_rad_per_sec=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            joint_torques_nm=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            tcp_velocity=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            motion_progress_percent=0.0,
+            temperature_celsius=(25.0, 25.0, 25.0, 25.0, 25.0, 25.0),
+            payload_kg=0.0,
+            collision_detected=False,
         )
 
     @property
@@ -95,6 +102,7 @@ class JakaDryRunRobotAdapter(BaseAdapter, RobotAdapter):
             connected=True,
             powered=True,
             enabled=True,
+            motion_progress_percent=0.0,
         )
         return self.status
 
@@ -162,6 +170,16 @@ class JakaDryRunRobotAdapter(BaseAdapter, RobotAdapter):
             self.status = replace(
                 self.status,
                 joint_positions_rad=preview.target_joint_positions_rad,
+                moving=False,
+                motion_progress_percent=100.0,
+                joint_velocities_rad_per_sec=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            )
+        elif command.action == RobotAction.STOP:
+            self.status = replace(
+                self.status,
+                moving=False,
+                joint_velocities_rad_per_sec=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                tcp_velocity=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
             )
         return self.status
 

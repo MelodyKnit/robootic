@@ -251,6 +251,14 @@ class GripperStatus:
 
     ``position`` is a physical feedback value only when ``position_is_feedback``
     is true. Some verified transports expose only their configured target position.
+
+    Enhanced telemetry fields provide more detailed feedback for monitoring and debugging:
+    - ``actual_position``: Real-time position feedback (if available)
+    - ``actual_force_percent``: Real-time gripping force measurement
+    - ``current_ma``: Motor current for force estimation
+    - ``object_detected``: Whether an object is detected between fingers
+    - ``position_reached``: Whether target position has been reached
+    - ``force_reached``: Whether target force has been reached
     """
 
     initialized: bool
@@ -264,11 +272,30 @@ class GripperStatus:
     grip_state: str = "unknown"
     last_error: Optional[str] = None
     position_is_feedback: bool = True
+    actual_position: Optional[int] = None
+    actual_force_percent: Optional[float] = None
+    current_ma: Optional[float] = None
+    object_detected: bool = False
+    position_reached: bool = False
+    force_reached: bool = False
 
 
 @dataclass(frozen=True)
 class RobotStatus:
-    """The safety-relevant live state reported by a robot adapter."""
+    """The safety-relevant live state reported by a robot adapter.
+
+    Enhanced telemetry fields provide more detailed feedback for monitoring and control:
+    - ``joint_velocities_rad_per_sec``: Current joint velocities (6-axis)
+    - ``joint_torques_nm``: Current joint torques in Newton-meters (6-axis)
+    - ``tcp_velocity``: TCP velocity [vx, vy, vz, wx, wy, wz] in mm/s and rad/s
+    - ``motion_progress_percent``: Progress of current motion (0-100)
+    - ``last_command_id``: ID of the last executed command
+    - ``last_error_code``: Numeric error code from controller
+    - ``last_error_message``: Human-readable error message
+    - ``temperature_celsius``: Joint motor temperatures (6-axis)
+    - ``payload_kg``: Current payload weight estimation
+    - ``collision_detected``: Whether a collision has been detected
+    """
 
     initialized: bool
     joint_positions_rad: Tuple[float, ...]
@@ -279,6 +306,16 @@ class RobotStatus:
     powered: bool = False
     enabled: bool = False
     moving: bool = False
+    joint_velocities_rad_per_sec: Optional[Tuple[float, ...]] = None
+    joint_torques_nm: Optional[Tuple[float, ...]] = None
+    tcp_velocity: Optional[Tuple[float, float, float, float, float, float]] = None
+    motion_progress_percent: Optional[float] = None
+    last_command_id: Optional[str] = None
+    last_error_code: Optional[int] = None
+    last_error_message: Optional[str] = None
+    temperature_celsius: Optional[Tuple[float, ...]] = None
+    payload_kg: Optional[float] = None
+    collision_detected: bool = False
 
 
 @dataclass(frozen=True)

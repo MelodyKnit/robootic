@@ -54,12 +54,26 @@ class SimulatedRobotAdapter(BaseAdapter, RobotAdapter):
             connected=False,
             powered=False,
             enabled=False,
+            joint_velocities_rad_per_sec=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            joint_torques_nm=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            tcp_velocity=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            motion_progress_percent=0.0,
+            temperature_celsius=(25.0, 25.0, 25.0, 25.0, 25.0, 25.0),
+            payload_kg=0.0,
+            collision_detected=False,
         )
 
     async def initialize(self) -> RobotStatus:
         """Mark the in-memory robot initialized without producing a physical motion."""
 
-        self.status = replace(self.status, initialized=True, connected=True, powered=True, enabled=True)
+        self.status = replace(
+            self.status,
+            initialized=True,
+            connected=True,
+            powered=True,
+            enabled=True,
+            motion_progress_percent=0.0,
+        )
         return self.status
 
     async def get_status(self) -> RobotStatus:
@@ -77,9 +91,30 @@ class SimulatedRobotAdapter(BaseAdapter, RobotAdapter):
         if self.fail_on_execute:
             raise RuntimeError("Simulated robot execution failed.")
         if command.action == RobotAction.MOVE_JOINTS:
-            self.status = replace(self.status, initialized=True, joint_positions_rad=command.joint_positions_rad)
+            self.status = replace(
+                self.status,
+                initialized=True,
+                joint_positions_rad=command.joint_positions_rad,
+                moving=False,
+                motion_progress_percent=100.0,
+                joint_velocities_rad_per_sec=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            )
         elif command.action == RobotAction.MOVE_LINEAR and command.target_pose is not None:
-            self.status = replace(self.status, initialized=True, tcp_pose=command.target_pose)
+            self.status = replace(
+                self.status,
+                initialized=True,
+                tcp_pose=command.target_pose,
+                moving=False,
+                motion_progress_percent=100.0,
+                tcp_velocity=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            )
+        elif command.action == RobotAction.STOP:
+            self.status = replace(
+                self.status,
+                moving=False,
+                joint_velocities_rad_per_sec=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                tcp_velocity=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            )
         return self.status
 
     async def synchronize(self, status: RobotStatus) -> None:
@@ -104,7 +139,17 @@ class SimulatedGripperAdapter(BaseAdapter, OperatorControllableGripper):
 
         super().__init__()
         self.fail_on_execute = fail_on_execute
-        self.status = GripperStatus(initialized=False, position=1000, gripping=False)
+        self.status = GripperStatus(
+            initialized=False,
+            position=1000,
+            gripping=False,
+            actual_position=1000,
+            actual_force_percent=0.0,
+            current_ma=0.0,
+            object_detected=False,
+            position_reached=True,
+            force_reached=False,
+        )
 
     @property
     def control_mode(self) -> str:
@@ -180,13 +225,23 @@ class SimulatedGripperAdapter(BaseAdapter, OperatorControllableGripper):
             self.status = replace(self.status, moving=False, grip_state="stopped")
             return self.status
         position = self.status.position if command.target_position is None else command.target_position
+        force = command.force_percent if command.force_percent is not None else 50.0
+        is_gripping = command.action == GripperAction.CLOSE
+        # Simulate object detection when closing and position < 500
+        object_detected = is_gripping and position < 500
         self.status = replace(
             self.status,
             position=position,
-            gripping=command.action == GripperAction.CLOSE,
+            actual_position=position,
+            gripping=is_gripping,
             moving=False,
-            grip_state="gripping" if command.action == GripperAction.CLOSE else "reached",
+            grip_state="gripping" if is_gripping else "reached",
             last_error=None,
+            actual_force_percent=force if is_gripping else 0.0,
+            current_ma=force * 10.0 if is_gripping else 0.0,  # Simulated current
+            object_detected=object_detected,
+            position_reached=True,
+            force_reached=is_gripping,
         )
         return self.status
 
