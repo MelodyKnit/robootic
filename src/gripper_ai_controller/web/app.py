@@ -61,6 +61,12 @@ from gripper_ai_controller.web.models import (
     ObjectPosePreviewSnapshot,
     PosePreviewSnapshot,
 )
+from gripper_ai_controller.web.calibration_api import (
+    install_calibration_routes,
+    set_calibration_service,
+)
+from gripper_ai_controller.web.calibration_service import CalibrationService
+from gripper_ai_controller.plugins.auto_calibration import build_auto_calibration_plugin
 from gripper_ai_controller.web.service import (
     CameraDeviceNotFoundError,
     CameraParameterCapabilityError,
@@ -510,6 +516,7 @@ def create_web_app(
     preview_service: Optional[CameraPreviewService] = None,
     gripper_control_service: Optional[ManualGripperControlService] = None,
     jaka_control_service: Optional[ManualJakaControlService] = None,
+    calibration_service: Optional[CalibrationService] = None,
 ) -> FastAPI:
     """Create one FastAPI app for preview plus optionally gated manual device control."""
 
@@ -620,6 +627,16 @@ def create_web_app(
                 controls_enabled=preview_config.settings.jaka_controls_enabled,
             )
 
+    if calibration_service is None:
+        if preview_config.jaka is not None:
+            # 构建自动标定插件（仅在有机器人适配器时）
+            calibration_plugin = build_auto_calibration_plugin(
+                robot_adapter=preview_config.jaka,
+                vision_adapter=preview_config.vision,
+                config=None,  # 使用默认配置
+            )
+            calibration_service = CalibrationService(calibration_plugin)
+
     if (
         bool(getattr(gripper_control_service, "controls_enabled", False))
         or bool(getattr(jaka_control_service, "controls_enabled", False))
@@ -637,9 +654,13 @@ def create_web_app(
             await gripper_control_service.startup()
         if jaka_control_service is not None:
             await jaka_control_service.startup()
+        if calibration_service is not None:
+            await calibration_service.plugin.startup()
         try:
             yield
         finally:
+            if calibration_service is not None:
+                await calibration_service.plugin.shutdown()
             if jaka_control_service is not None:
                 await jaka_control_service.shutdown()
             if gripper_control_service is not None:
@@ -657,6 +678,7 @@ def create_web_app(
     application.state.preview_plugin_host = service.plugin_host
     application.state.manual_gripper_control_service = gripper_control_service
     application.state.manual_jaka_control_service = jaka_control_service
+    application.state.calibration_service = calibration_service
 
     @application.exception_handler(RequestValidationError)
     async def invalid_request_error(request, error):
@@ -1107,6 +1129,12 @@ def create_web_app(
 
     install_gripper_routes(application, gripper_control_service)
     install_jaka_routes(application, jaka_control_service)
+
+    # 安装标定路由
+    if calibration_service is not None:
+        set_calibration_service(calibration_service)
+        install_calibration_routes(application)
+
     _mount_frontend_if_present(application, frontend_dist_dir)
     return application
 
