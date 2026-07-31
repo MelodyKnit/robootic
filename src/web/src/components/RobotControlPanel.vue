@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 
 import type { JointMovePreview, JointVector, RobotStatus } from '../api/robot'
 import { useJakaControl } from '../composables/useJakaControl'
+import RobotViewer3D from './RobotViewer3D.vue'
 
 type ConfirmationMode = 'arm' | 'power-on' | 'enable' | 'move'
 
@@ -28,6 +29,7 @@ const {
 const jointNames = ['J1', 'J2', 'J3', 'J4', 'J5', 'J6'] as const
 const jointDraftDegrees = ref<number[]>([0, 0, 0, 0, 0, 0])
 const speedRadPerSecond = ref(0.1)
+const show3DViewer = ref(true) // 默认显示3D视图
 const stepDegrees = ref(2.0)
 const draftStepModeEnabled = ref(false)
 const confirmationMode = ref<ConfirmationMode | null>(null)
@@ -375,32 +377,50 @@ function sameJointVector(first: JointVector, second: JointVector, tolerance = 0.
 </script>
 
 <template>
-  <section class="flex min-h-full flex-col bg-slate-950 p-5 text-slate-300 select-none" aria-label="机械臂控制">
-    <div class="flex items-start justify-between gap-3 border-b border-slate-900 pb-4">
-      <div class="min-w-0">
-        <div class="flex flex-wrap items-center gap-2">
-          <h2 class="text-xs font-bold text-slate-500">机械臂控制</h2>
-          <span
-            v-if="robot"
-            class="rounded border px-1.5 py-0.5 text-[9px] font-bold"
-            :class="robot.mode === 'physical' ? 'border-amber-900/60 bg-amber-950/40 text-amber-400' : 'border-sky-900/60 bg-sky-950/40 text-sky-400'"
-          >
-            {{ modeLabel }}
-          </span>
-        </div>
-        <p class="mt-1 truncate text-xs font-semibold text-slate-300" :title="robot?.id ?? ''">
-          {{ robot?.id ?? (isLoading ? '正在连接控制服务...' : (errorMessage ? '控制服务不可用' : '未配置机械臂')) }}
-        </p>
-      </div>
-      <button
-        type="button"
-        class="shrink-0 rounded border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-slate-600 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-        :disabled="robot === null || isBusy"
-        @click="reconnect"
-      >
-        重新连接
-      </button>
+  <div class="robot-control-layout">
+    <!-- 3D可视化区域 -->
+    <div v-if="show3DViewer && robot" class="viewer-section">
+      <RobotViewer3D />
     </div>
+
+    <!-- 控制面板区域 -->
+    <section class="control-section flex min-h-full flex-col bg-slate-950 p-5 text-slate-300 select-none" aria-label="机械臂控制">
+      <div class="flex items-start justify-between gap-3 border-b border-slate-900 pb-4">
+        <div class="min-w-0">
+          <div class="flex flex-wrap items-center gap-2">
+            <h2 class="text-xs font-bold text-slate-500">机械臂控制</h2>
+            <span
+              v-if="robot"
+              class="rounded border px-1.5 py-0.5 text-[9px] font-bold"
+              :class="robot.mode === 'physical' ? 'border-amber-900/60 bg-amber-950/40 text-amber-400' : 'border-sky-900/60 bg-sky-950/40 text-sky-400'"
+            >
+              {{ modeLabel }}
+            </span>
+          </div>
+          <p class="mt-1 truncate text-xs font-semibold text-slate-300" :title="robot?.id ?? ''">
+            {{ robot?.id ?? (isLoading ? '正在连接控制服务...' : (errorMessage ? '控制服务不可用' : '未配置机械臂')) }}
+          </p>
+        </div>
+        <div class="flex gap-2">
+          <button
+            type="button"
+            class="shrink-0 rounded border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-slate-600 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="robot === null"
+            @click="show3DViewer = !show3DViewer"
+            :title="show3DViewer ? '隐藏3D视图' : '显示3D视图'"
+          >
+            {{ show3DViewer ? '📐' : '🔲' }}
+          </button>
+          <button
+            type="button"
+            class="shrink-0 rounded border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-slate-600 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="robot === null || isBusy"
+            @click="reconnect"
+          >
+            重新连接
+          </button>
+        </div>
+      </div>
 
     <p
       v-if="errorMessage"
@@ -726,5 +746,36 @@ function sameJointVector(first: JointVector, second: JointVector, tolerance = 0.
         </div>
       </section>
     </div>
-  </section>
+    </section>
+  </div>
 </template>
+
+<style scoped>
+.robot-control-layout {
+  display: grid;
+  grid-template-columns: 1fr 400px;
+  gap: 0;
+  height: 100vh;
+  background: #0f172a;
+}
+
+.viewer-section {
+  min-height: 600px;
+  height: 100%;
+  padding: 1rem;
+}
+
+.control-section {
+  border-left: 1px solid #1e293b;
+  overflow-y: auto;
+}
+
+/* 当隐藏3D视图时，控制面板占满全宽 */
+.robot-control-layout:has(.viewer-section:not(:empty)) .control-section {
+  grid-column: 2;
+}
+
+.robot-control-layout:not(:has(.viewer-section)) .control-section {
+  grid-column: 1 / -1;
+}
+</style>
