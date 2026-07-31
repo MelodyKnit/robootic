@@ -873,6 +873,51 @@ def create_web_app(
             return unknown
         return _status_response(await service.hub.status())
 
+    @application.get("/api/cameras/{camera_id}/recording/status")
+    async def recording_status(camera_id: str):
+        """Return recording status for the camera."""
+
+        unknown = _unknown_camera_response(camera_id, service.camera_id)
+        if unknown is not None:
+            return unknown
+        return service.get_recording_status()
+
+    @application.post("/api/cameras/{camera_id}/screenshot")
+    async def capture_screenshot(camera_id: str):
+        """Capture one screenshot from camera stream."""
+
+        unknown = _unknown_camera_response(camera_id, service.camera_id)
+        if unknown is not None:
+            return unknown
+        try:
+            return await service.capture_screenshot()
+        except Exception as error:
+            return _error_response(500, "screenshot_failed", str(error))
+
+    @application.post("/api/cameras/{camera_id}/recording/start")
+    async def start_recording(camera_id: str, fps: Optional[int] = None):
+        """Start recording camera stream to a video file."""
+
+        unknown = _unknown_camera_response(camera_id, service.camera_id)
+        if unknown is not None:
+            return unknown
+        try:
+            return await service.start_recording(fps)
+        except Exception as error:
+            return _error_response(500, "start_recording_failed", str(error))
+
+    @application.post("/api/cameras/{camera_id}/recording/stop")
+    async def stop_recording(camera_id: str):
+        """Stop current camera stream video recording."""
+
+        unknown = _unknown_camera_response(camera_id, service.camera_id)
+        if unknown is not None:
+            return unknown
+        try:
+            return await service.stop_recording()
+        except Exception as error:
+            return _error_response(500, "stop_recording_failed", str(error))
+
     @application.get("/api/cameras/{camera_id}/parameters", response_model=CameraParametersResponse)
     async def camera_parameters(camera_id: str):
         """Return runtime-supported browser controls without exposing an MVS client."""

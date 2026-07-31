@@ -1,0 +1,5 @@
+{
+  "plugin_type": "object-detection-analysis",
+  "description": "物体检测分析预览插件",
+  "settings": {}
+}

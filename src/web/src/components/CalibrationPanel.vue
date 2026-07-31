@@ -307,7 +307,7 @@ const canProceed = computed(() => {
 });
 
 const stateText = computed(() => {
-  const stateMap = {
+  const stateMap: Record<string, string> = {
     idle: '空闲',
     ready: '就绪',
     running: '运行中',

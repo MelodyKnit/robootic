@@ -1,0 +1,5 @@
+{
+  "adapter_type": "simulated-robot",
+  "description": "仿真机器人适配器 - 用于开发和测试",
+  "settings": {}
+}

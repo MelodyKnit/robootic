@@ -290,6 +290,10 @@ class JakaAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "boolean"):
             JakaAdapter("controller.test", allow_enable="true")
 
+    def test_remote_power_on_configuration_requires_a_strict_boolean(self):
+        with self.assertRaisesRegex(ValueError, "boolean"):
+            JakaAdapter("controller.test", allow_remote_power_on="true")
+
     def test_controller_endpoint_requires_a_non_empty_string(self):
         for invalid_endpoint in (None, "", "   ", 123):
             with self.assertRaisesRegex(ValueError, "controller_ip"):
@@ -340,6 +344,54 @@ class JakaAdapterTests(unittest.TestCase):
             with self.assertRaises(JakaAdapterError):
                 await adapter.enable()
             self.assertNotIn("enable_robot", client.calls)
+            self.assertNotIn("power_on", client.calls)
+            await adapter.shutdown()
+
+        self.run_async(scenario())
+
+    def test_power_on_requires_explicit_local_permission(self):
+        async def scenario():
+            client = FakeJakaClient(powered=False)
+            adapter = JakaAdapter("controller.test", client_factory=lambda _: client)
+            await adapter.startup()
+            with self.assertRaises(PermissionError):
+                await adapter.power_on()
+            self.assertNotIn("power_on", client.calls)
+            await adapter.shutdown()
+
+        self.run_async(scenario())
+
+    def test_power_on_succeeds_when_explicitly_allowed(self):
+        async def scenario():
+            client = FakeJakaClient(powered=False)
+            adapter = JakaAdapter("controller.test", allow_remote_power_on=True, client_factory=lambda _: client)
+            await adapter.startup()
+            status = await adapter.power_on()
+            self.assertTrue(status.powered)
+            self.assertIn("power_on", client.calls)
+            await adapter.shutdown()
+
+        self.run_async(scenario())
+
+    def test_power_on_is_idempotent(self):
+        async def scenario():
+            client = FakeJakaClient(powered=True)
+            adapter = JakaAdapter("controller.test", allow_remote_power_on=True, client_factory=lambda _: client)
+            await adapter.startup()
+            status = await adapter.power_on()
+            self.assertTrue(status.powered)
+            self.assertNotIn("power_on", client.calls)
+            await adapter.shutdown()
+
+        self.run_async(scenario())
+
+    def test_power_on_rejects_faulted_controller(self):
+        async def scenario():
+            client = FakeJakaClient(powered=False, faulted=True)
+            adapter = JakaAdapter("controller.test", allow_remote_power_on=True, client_factory=lambda _: client)
+            await adapter.startup()
+            with self.assertRaises(JakaAdapterError):
+                await adapter.power_on()
             self.assertNotIn("power_on", client.calls)
             await adapter.shutdown()
 

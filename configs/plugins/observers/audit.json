@@ -1,0 +1,5 @@
+{
+  "plugin_type": "audit",
+  "description": "审计观察者插件 - 记录运行时事件",
+  "settings": {}
+}

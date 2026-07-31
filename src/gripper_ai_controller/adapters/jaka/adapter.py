@@ -63,6 +63,7 @@ class JakaAdapter(BaseAdapter, RobotAdapter):
         self,
         controller_ip: str,
         allow_enable: bool = False,
+        allow_remote_power_on: bool = False,
         allow_manual_motion: bool = False,
         client_factory: Optional[Callable[[str], Any]] = None,
         joint_lower_limits_rad: Optional[object] = None,
@@ -74,10 +75,10 @@ class JakaAdapter(BaseAdapter, RobotAdapter):
         """Bind one controller endpoint without establishing a connection yet.
 
         `controller_ip` must come from ignored local configuration or an explicit caller,
-        never from a version-controlled project configuration. `allow_enable` and
-        `allow_manual_motion` remain false by default because both can change physical
-        hardware state. Optional joint limits and speed/step caps construct the pure
-        pre-dispatch constraint used by the separately gated manual-control facade.
+        never from a version-controlled project configuration. `allow_enable`,
+        `allow_remote_power_on`, and `allow_manual_motion` remain false by default because
+        all can change physical hardware state. Optional joint limits and speed/step caps
+        construct the pure pre-dispatch constraint used by the separately gated manual-control facade.
         """
 
         super().__init__()
@@ -85,6 +86,8 @@ class JakaAdapter(BaseAdapter, RobotAdapter):
             raise ValueError("JAKA controller_ip must be a non-empty string.")
         if type(allow_enable) is not bool:
             raise ValueError("JAKA allow_enable must be a boolean value.")
+        if type(allow_remote_power_on) is not bool:
+            raise ValueError("JAKA allow_remote_power_on must be a boolean value.")
         if type(allow_manual_motion) is not bool:
             raise ValueError("JAKA allow_manual_motion must be a boolean value.")
         if robot_model is not None and robot_model != MANUAL_MOTION_ROBOT_MODEL:
@@ -95,6 +98,7 @@ class JakaAdapter(BaseAdapter, RobotAdapter):
             )
         self.controller_ip = controller_ip.strip()
         self.allow_enable = allow_enable
+        self.allow_remote_power_on = allow_remote_power_on
         self.allow_manual_motion = allow_manual_motion
         self.robot_model = robot_model
         self.client_factory = client_factory or self.create_vendor_client
@@ -249,6 +253,35 @@ class JakaAdapter(BaseAdapter, RobotAdapter):
         self.ensure_started()
         return str(self.require_payload("get_sdk_version", await self._call_client_method("get_sdk_version")))
 
+    async def power_on(self) -> RobotStatus:
+        """Power on the controller after explicit local authorization.
+
+        This method requires `allow_remote_power_on=True` in local configuration.
+        Remote power-on should only be enabled in controlled environments where the
+        operator can verify the work area is clear and safe before initiating.
+        """
+
+        self.ensure_started()
+        if not self.allow_remote_power_on:
+            raise PermissionError(
+                "JAKA remote power-on is disabled. Enable it in local configuration with "
+                "'allow_remote_power_on: true' only if you have verified the work area is "
+                "clear and safe. Remote power-on should not be enabled in production environments."
+            )
+        status = await self.get_status()
+        if status.faulted or status.emergency_stopped:
+            raise JakaAdapterError(
+                "JAKA power-on refused because the controller reports a fault or emergency stop. "
+                "Clear the fault on the teach pendant first."
+            )
+        if self._powered:
+            return status
+        self.require_success("power_on", await self._call_client_method("power_on"))
+        status = await self.get_status()
+        if not self._powered:
+            raise JakaAdapterError("JAKA power_on returned success but telemetry still reports not powered.")
+        return status
+
     async def enable(self) -> RobotStatus:
         """Enable a powered, fault-free robot only after explicit local authorization.
 
@@ -290,6 +323,11 @@ class JakaAdapter(BaseAdapter, RobotAdapter):
         await self.shutdown()
         await self.startup()
         return await self.initialize()
+
+    async def operator_power_on(self) -> RobotStatus:
+        """Power on the controller only through the separately authorized manual-control facade."""
+
+        return await self.power_on()
 
     async def operator_enable(self) -> RobotStatus:
         """Enable servos only through the separately authorized manual-control facade."""

@@ -178,8 +178,87 @@ def _build_safety_limits(settings: Dict[str, Any]) -> SafetyLimits:
     return SafetyLimits(**settings)
 
 
+def _resolve_config_references(
+    value: Any, base_dir: Path, visited: Optional[set] = None
+) -> Any:
+    """递归解析配置中的@引用，支持嵌套和循环检测。
+
+    Args:
+        value: 配置值（可能包含@引用）
+        base_dir: 基准目录，用于解析相对路径
+        visited: 已访问的文件集合，用于循环检测
+
+    Returns:
+        解析后的配置值
+
+    引用语法：
+        - 字符串以"@"开头 → 加载外部JSON文件
+        - 适配器引用返回adapter_type字符串（保持向后兼容）
+        - 插件引用返回plugin_type字符串
+        - 普通字符串 → 保持不变（适配器/插件类型名）
+        - 对象/列表 → 递归处理其中的值
+    """
+    if visited is None:
+        visited = set()
+
+    # 字符串：检查是否为引用
+    if isinstance(value, str):
+        if value.startswith("@"):
+            ref_path = value[1:]  # 去掉@前缀
+            full_path = base_dir / ref_path
+
+            # 循环引用检测
+            abs_path = full_path.resolve()
+            if abs_path in visited:
+                raise ValueError(f"检测到循环引用: {abs_path}")
+
+            # 加载引用的文件
+            if not full_path.exists():
+                raise FileNotFoundError(f"引用的配置文件不存在: {ref_path} (完整路径: {full_path})")
+
+            visited.add(abs_path)
+            try:
+                with full_path.open("r", encoding="utf-8") as handle:
+                    referenced_config = json.load(handle)
+
+                # 如果引用的文件包含adapter_type，返回类型名（向后兼容）
+                if isinstance(referenced_config, dict) and "adapter_type" in referenced_config:
+                    return referenced_config["adapter_type"]
+
+                # 如果引用的文件包含plugin_type，返回类型名（向后兼容）
+                if isinstance(referenced_config, dict) and "plugin_type" in referenced_config:
+                    return referenced_config["plugin_type"]
+
+                # 否则递归解析引用文件中的内容
+                return _resolve_config_references(referenced_config, base_dir, visited)
+            finally:
+                visited.discard(abs_path)
+        else:
+            # 普通字符串，不是引用
+            return value
+
+    # 字典：递归处理所有值
+    elif isinstance(value, dict):
+        return {k: _resolve_config_references(v, base_dir, visited) for k, v in value.items()}
+
+    # 列表：递归处理所有元素
+    elif isinstance(value, list):
+        return [_resolve_config_references(item, base_dir, visited) for item in value]
+
+    # 其他类型（数字、布尔等）：直接返回
+    else:
+        return value
+
+
 def load_json_config(config_file: str) -> Dict[str, Any]:
-    """Read a JSON object while reporting missing files and malformed JSON clearly."""
+    """Read a JSON object while reporting missing files and malformed JSON clearly.
+
+    支持@引用语法：
+        - "@adapters/simulated-camera.json" → 加载configs/adapters/simulated-camera.json
+        - 普通字符串保持不变
+        - 递归解析嵌套引用
+        - 自动检测循环引用
+    """
 
     path = Path(config_file)
     if path.suffix.lower() != ".json":
@@ -193,7 +272,12 @@ def load_json_config(config_file: str) -> Dict[str, Any]:
         raise ValueError("Configuration JSON is invalid: {0}".format(error))
     if not isinstance(payload, dict):
         raise ValueError("Configuration root must be a JSON object.")
-    return payload
+
+    # 解析引用（基于配置文件所在目录）
+    base_dir = path.parent
+    resolved_payload = _resolve_config_references(payload, base_dir)
+
+    return resolved_payload
 
 
 def create_component(

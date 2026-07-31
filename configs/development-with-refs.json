@@ -1,0 +1,76 @@
+{
+  "_comment": "这是使用@引用语法的示例配置，展示如何引用adapters/和plugins/中的配置",
+  "runtime_mode": "development",
+  "camera": {
+    "camera_id": "sim-camera",
+    "calibration_id": "sim-camera-calibration",
+    "mounting": "fixed"
+  },
+  "components": {
+    "vision": "@adapters/simulated-camera.json",
+    "plugins": {
+      "perception": "@plugins/perception/deterministic-perception.json",
+      "planners": [
+        "@plugins/planners/demonstration-planner.json"
+      ],
+      "observers": [
+        "@plugins/observers/audit.json"
+      ],
+      "preview": [
+        "@plugins/preview/visual-pose-analysis.json",
+        "@plugins/preview/object-pose-analysis.json",
+        "@plugins/preview/object-detection-analysis.json"
+      ]
+    }
+  },
+  "camera_selection": {
+    "enabled": false,
+    "calibration_ids": {}
+  },
+  "camera_parameters": {
+    "pixel_format": "RGB8"
+  },
+  "object_detection": {
+    "enabled": false,
+    "selected_model_id": "fasterrcnn-coco-local",
+    "max_analysis_fps": 2,
+    "overlay_max_frame_lag_seconds": 0.5,
+    "models": []
+  },
+  "targets": [
+    {
+      "name": "sim-primary",
+      "role": "primary",
+      "robot_adapter": "@adapters/simulated-robot.json",
+      "gripper_adapter": "@adapters/simulated-gripper.json"
+    },
+    {
+      "name": "sim-mirror",
+      "role": "mirror",
+      "robot_adapter": "@adapters/simulated-robot.json",
+      "gripper_adapter": "@adapters/simulated-gripper.json"
+    }
+  ],
+  "jaka_control": {
+    "target_name": "sim-primary",
+    "joint_timeout_seconds": 30.0,
+    "arm_timeout_seconds": 60.0
+  },
+  "safety": {
+    "minimum_perception_confidence": 0.7,
+    "maximum_perception_age_seconds": 2.0
+  },
+  "web": {
+    "bind_host": "127.0.0.1",
+    "port": 8000,
+    "frontend_dist_dir": "src/web/dist",
+    "stream_fps": 10,
+    "jpeg_quality": 80,
+    "capture_retry_seconds": 1.0,
+    "camera_controls_enabled": true,
+    "gripper_controls_enabled": true,
+    "jaka_controls_enabled": true,
+    "plugin_reload_enabled": true,
+    "plugin_lifecycle_controls_enabled": true
+  }
+}

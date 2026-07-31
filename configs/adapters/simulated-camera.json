@@ -1,0 +1,5 @@
+{
+  "adapter_type": "simulated-camera",
+  "description": "仿真相机适配器 - 用于开发和测试",
+  "settings": {}
+}

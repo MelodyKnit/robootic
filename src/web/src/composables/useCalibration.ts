@@ -4,7 +4,7 @@
  * 提供标定状态管理、API调用和WebSocket连接
  */
 
-import { ref, reactive, computed } from 'vue';
+import { ref, computed } from 'vue';
 
 interface CalibrationStatus {
   phase: string;
@@ -51,6 +51,10 @@ export function useCalibration() {
   const result = ref<any>({});
 
   let ws: WebSocket | null = null;
+  let reconnectAttempts = 0;
+  let maxReconnectAttempts = 5;
+  let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+  let isIntentionallyClosed = false;
 
   // ============================================================================
   // 计算属性
@@ -244,48 +248,102 @@ export function useCalibration() {
   // ============================================================================
 
   function connectWebSocket() {
+    // 如果已经有连接，先关闭
+    if (ws && ws.readyState !== WebSocket.CLOSED) {
+      return;
+    }
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/api/calibration/ws`;
 
-    ws = new WebSocket(wsUrl);
+    try {
+      ws = new WebSocket(wsUrl);
 
-    ws.onopen = () => {
-      console.log('WebSocket已连接');
-      addLog('info', 'WebSocket已连接');
-    };
+      ws.onopen = () => {
+        console.log('WebSocket已连接');
+        addLog('info', 'WebSocket已连接');
+        reconnectAttempts = 0; // 重置重连计数
+      };
 
-    ws.onmessage = (event) => {
-      try {
-        const message = JSON.parse(event.data);
-        handleWebSocketMessage(message);
-      } catch (error) {
-        console.error('解析WebSocket消息失败:', error);
-      }
-    };
-
-    ws.onerror = (error) => {
-      console.error('WebSocket错误:', error);
-      addLog('error', 'WebSocket连接错误');
-    };
-
-    ws.onclose = () => {
-      console.log('WebSocket已断开');
-      addLog('warning', 'WebSocket已断开');
-
-      // 尝试重连（可选）
-      setTimeout(() => {
-        if (ws && ws.readyState === WebSocket.CLOSED) {
-          console.log('尝试重连WebSocket...');
-          connectWebSocket();
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          handleWebSocketMessage(message);
+        } catch (error) {
+          console.error('解析WebSocket消息失败:', error);
         }
-      }, 3000);
-    };
+      };
+
+      ws.onerror = (error) => {
+        console.error('WebSocket错误:', error);
+        addLog('error', 'WebSocket连接错误');
+      };
+
+      ws.onclose = (event) => {
+        console.log('WebSocket已断开', event.code, event.reason);
+
+        // 只在非主动关闭时尝试重连
+        if (!isIntentionallyClosed) {
+          addLog('warning', 'WebSocket已断开，尝试重连...');
+          attemptReconnect();
+        }
+      };
+    } catch (error) {
+      console.error('创建WebSocket失败:', error);
+      addLog('error', 'WebSocket创建失败');
+      attemptReconnect();
+    }
+  }
+
+  function attemptReconnect() {
+    // 清除之前的重连定时器
+    if (reconnectTimeout) {
+      clearTimeout(reconnectTimeout);
+      reconnectTimeout = null;
+    }
+
+    // 如果超过最大重连次数，停止重连
+    if (reconnectAttempts >= maxReconnectAttempts) {
+      console.log('达到最大重连次数，停止重连');
+      addLog('error', 'WebSocket重连失败，已切换到轮询模式');
+      return;
+    }
+
+    reconnectAttempts++;
+    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 30000); // 指数退避，最多30秒
+
+    console.log(`将在 ${delay}ms 后尝试第 ${reconnectAttempts} 次重连...`);
+
+    reconnectTimeout = setTimeout(() => {
+      if (ws && ws.readyState === WebSocket.CLOSED && !isIntentionallyClosed) {
+        console.log(`尝试第 ${reconnectAttempts} 次重连...`);
+        connectWebSocket();
+      }
+    }, delay);
   }
 
   function disconnectWebSocket() {
+    isIntentionallyClosed = true;
+
+    if (reconnectTimeout) {
+      clearTimeout(reconnectTimeout);
+      reconnectTimeout = null;
+    }
+
     if (ws) {
       ws.close();
       ws = null;
+    }
+
+    reconnectAttempts = 0;
+  }
+
+  function resetWebSocket() {
+    isIntentionallyClosed = false;
+    reconnectAttempts = 0;
+    if (reconnectTimeout) {
+      clearTimeout(reconnectTimeout);
+      reconnectTimeout = null;
     }
   }
 
@@ -413,6 +471,7 @@ export function useCalibration() {
     // WebSocket
     connectWebSocket,
     disconnectWebSocket,
+    resetWebSocket,
 
     // 日志
     addLog,

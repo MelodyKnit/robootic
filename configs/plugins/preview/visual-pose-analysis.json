@@ -1,0 +1,5 @@
+{
+  "plugin_type": "visual-pose-analysis",
+  "description": "视觉姿态分析预览插件",
+  "settings": {}
+}

@@ -312,6 +312,21 @@ export async function disarmRobot(robotId: string, armToken: string, keepalive =
     keepalive,
   })
 }
+/** Powers on the controller after temporary authorization and safety confirmation. */
+export async function powerOnRobot(
+  robotId: string,
+  armToken: string,
+  idempotencyKey: string,
+): Promise<RobotOperationResult> {
+  const payload = await requestJson(`/api/robots/${encodeURIComponent(robotId)}/power-on`, {
+    method: 'POST',
+    headers: {
+      'X-Robot-Control-Token': armToken,
+      'Idempotency-Key': idempotencyKey,
+    },
+  })
+  return parseOperationResult(payload)
+}
 
 /** Explicitly enables already-powered servos after temporary authorization. */
 export async function enableRobot(

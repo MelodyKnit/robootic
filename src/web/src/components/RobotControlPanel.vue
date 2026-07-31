@@ -4,7 +4,7 @@ import { computed, ref, watch } from 'vue'
 import type { JointMovePreview, JointVector, RobotStatus } from '../api/robot'
 import { useJakaControl } from '../composables/useJakaControl'
 
-type ConfirmationMode = 'arm' | 'enable' | 'move'
+type ConfirmationMode = 'arm' | 'power-on' | 'enable' | 'move'
 
 const {
   arm,
@@ -20,6 +20,7 @@ const {
   nowSeconds,
   operationMessage,
   operationState,
+  powerOn,
   reconnect,
   robot,
 } = useJakaControl()
@@ -32,6 +33,7 @@ const draftStepModeEnabled = ref(false)
 const confirmationMode = ref<ConfirmationMode | null>(null)
 const workcellClear = ref(false)
 const emergencyStopAvailable = ref(false)
+const powerOnApproved = ref(false)
 const enableApproved = ref(false)
 const previewApproved = ref(false)
 const preview = ref<JointMovePreview | null>(null)
@@ -57,6 +59,19 @@ const canArm = computed(
     !robot.value.emergencyStopped &&
     !isBusy.value &&
     !isArmed.value,
+)
+const canPowerOn = computed(
+  () =>
+    robot.value !== null &&
+    robot.value.controlsEnabled &&
+    robot.value.manualMotionEnabled &&
+    robot.value.connected &&
+    !robot.value.powered &&
+    !robot.value.moving &&
+    !robot.value.faulted &&
+    !robot.value.emergencyStopped &&
+    isArmed.value &&
+    !isBusy.value,
 )
 const canEnable = computed(
   () =>
@@ -100,6 +115,9 @@ const canConfirmPreview = computed(
 const confirmationReady = computed(() => {
   if (confirmationMode.value === 'arm') {
     return workcellClear.value && emergencyStopAvailable.value
+  }
+  if (confirmationMode.value === 'power-on') {
+    return powerOnApproved.value
   }
   if (confirmationMode.value === 'enable') {
     return enableApproved.value
@@ -157,6 +175,11 @@ function openArmConfirmation(): void {
   confirmationMode.value = 'arm'
 }
 
+function openPowerOnConfirmation(): void {
+  powerOnApproved.value = false
+  confirmationMode.value = 'power-on'
+}
+
 function openEnableConfirmation(): void {
   enableApproved.value = false
   confirmationMode.value = 'enable'
@@ -190,6 +213,12 @@ async function confirmAction(): Promise<void> {
         emergencyStopAvailable: emergencyStopAvailable.value,
       })
     ) {
+      confirmationMode.value = null
+    }
+    return
+  }
+  if (confirmationMode.value === 'power-on') {
+    if (await powerOn()) {
       confirmationMode.value = null
     }
     return
@@ -393,7 +422,10 @@ function sameJointVector(first: JointVector, second: JointVector, tolerance = 0.
         </div>
         <div>
           <dt class="text-[10px] font-bold text-slate-600">电源</dt>
-          <dd class="mt-1 font-semibold text-slate-300">{{ robot.powered ? '已上电' : '未上电' }}</dd>
+          <dd class="mt-1 font-semibold" :class="robot.powered ? 'text-emerald-400' : 'text-amber-400'">
+            {{ robot.powered ? '已上电' : '未上电' }}
+          </dd>
+          <dd v-if="!robot.powered" class="mt-0.5 text-[9px] text-slate-500">需在控制器手动上电</dd>
         </div>
         <div>
           <dt class="text-[10px] font-bold text-slate-600">伺服</dt>
@@ -433,8 +465,28 @@ function sameJointVector(first: JointVector, second: JointVector, tolerance = 0.
       <div class="border-b border-slate-900 py-4">
         <div class="flex items-center justify-between gap-3">
           <div>
+            <p class="text-xs font-bold text-slate-400">控制器上电</p>
+            <p v-if="robot.powered" class="mt-1 text-[10px] text-emerald-400">✓ 控制器已上电</p>
+            <p v-else class="mt-1 text-[10px] text-slate-600">需要上电后才能使能伺服。</p>
+          </div>
+          <button
+            type="button"
+            class="rounded border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-bold text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="!canPowerOn"
+            @click="openPowerOnConfirmation"
+          >
+            {{ robot.powered ? '已上电' : '上电控制器' }}
+          </button>
+        </div>
+      </div>
+
+      <div class="border-b border-slate-900 py-4">
+        <div class="flex items-center justify-between gap-3">
+          <div>
             <p class="text-xs font-bold text-slate-400">伺服使能</p>
-            <p class="mt-1 text-[10px] text-slate-600">网页不会自动上电或自动使能。</p>
+            <p v-if="robot.powered && !robot.enabled" class="mt-1 text-[10px] text-slate-600">上电后可使能伺服。</p>
+            <p v-else-if="robot.enabled" class="mt-1 text-[10px] text-emerald-400">✓ 伺服已使能</p>
+            <p v-else class="mt-1 text-[10px] text-amber-400">⚠ 请先上电控制器</p>
           </div>
           <button
             type="button"
@@ -607,6 +659,25 @@ function sameJointVector(first: JointVector, second: JointVector, tolerance = 0.
               现场独立急停可用，并且我知道其位置。
             </label>
           </div>
+        </template>
+        <template v-else-if="confirmationMode === 'power-on'">
+          <h3 id="robot-power-on-title" class="text-sm font-bold text-slate-100">⚠️ 确认控制器上电</h3>
+          <div class="mt-4 space-y-3 rounded border border-amber-900/40 bg-amber-950/20 p-3">
+            <p class="text-xs font-bold text-amber-300">上电前安全检查清单：</p>
+            <ul class="space-y-2 text-xs leading-5 text-amber-200">
+              <li>✓ 工作区域已清空，无人员</li>
+              <li>✓ 机械臂姿态安全，无障碍物</li>
+              <li>✓ 急停按钮在可触及范围内</li>
+              <li>✓ 已通知周围人员</li>
+            </ul>
+          </div>
+          <p class="mt-3 text-xs leading-5 text-slate-400">
+            远程上电会启动电机电源。此操作仅在实验室受控环境下使用，生产环境应使用控制柜物理按钮。
+          </p>
+          <label class="mt-4 flex cursor-pointer items-start gap-3 text-xs leading-5 text-slate-300">
+            <input v-model="powerOnApproved" type="checkbox" class="mt-0.5 accent-emerald-500" />
+            我已完成上述安全检查，确认可以远程上电。
+          </label>
         </template>
         <template v-else-if="confirmationMode === 'enable'">
           <h3 id="robot-enable-title" class="text-sm font-bold text-slate-100">确认使能 JAKA 伺服</h3>

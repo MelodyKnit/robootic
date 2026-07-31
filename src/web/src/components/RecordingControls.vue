@@ -58,7 +58,7 @@ async function takeSnapshot() {
       throw new Error(error.message || '截图失败')
     }
 
-    const result = await response.json()
+    await response.json()
     emit('snapshot')
 
     // 显示成功提示
@@ -91,7 +91,7 @@ async function startRecording() {
       throw new Error(error.message || '开始录制失败')
     }
 
-    const result = await response.json()
+    await response.json()
     isRecording.value = true
     emit('recordingStarted')
 

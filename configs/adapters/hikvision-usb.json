@@ -1,0 +1,11 @@
+{
+  "adapter_type": "hikvision-camera",
+  "description": "海康威视USB相机适配器",
+  "settings": {
+    "camera_id": "hikvision-usb",
+    "calibration_id": "replace-with-local-calibration-id",
+    "camera_serial": "replace-with-local-camera-serial",
+    "frame_timeout_ms": 1000,
+    "frame_delivery_mode": "latest_only"
+  }
+}

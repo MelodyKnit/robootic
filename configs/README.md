@@ -243,3 +243,126 @@ poetry run gripper-ai-controller image-centering-simulate --config-file configs/
 ```
 
 该命令只在控制台输出预测目标位置和虚拟六轴状态，不写入配置或数据目录，也不会创建相机、网页服务、`Runtime`、机器人或夹爪连接。`image_jacobian` 与限位不是现场标定；真实图像伺服参数、相机内参、手眼标定和机器人安全边界必须保存在后续受控设计中，而不能直接套用此模板。
+
+---
+
+## 配置引用语法（新增）
+
+### 基本用法
+
+使用 `@` 前缀引用外部配置文件，实现模块化配置管理：
+
+```json
+{
+  "components": {
+    "vision": "@adapters/simulated-camera.json",
+    "plugins": {
+      "perception": "@plugins/perception/deterministic-perception.json"
+    }
+  },
+  "targets": [
+    {
+      "name": "sim-primary",
+      "robot_adapter": "@adapters/simulated-robot.json",
+      "gripper_adapter": "@adapters/simulated-gripper.json"
+    }
+  ]
+}
+```
+
+### 新增目录结构
+
+```
+configs/
+├── adapters/           # 适配器配置
+│   ├── simulated-camera.json
+│   ├── simulated-robot.json
+│   ├── simulated-gripper.json
+│   ├── hikvision-usb.json
+│   └── jaka-zu3.json
+├── plugins/            # 插件配置
+│   ├── perception/
+│   │   └── deterministic-perception.json
+│   ├── planners/
+│   │   └── demonstration-planner.json
+│   ├── observers/
+│   │   └── audit.json
+│   └── preview/
+│       ├── visual-pose-analysis.json
+│       ├── object-pose-analysis.json
+│       └── object-detection-analysis.json
+└── examples/           # 示例配置（已迁移）
+```
+
+### 适配器配置格式
+
+```json
+{
+  "adapter_type": "simulated-camera",
+  "description": "仿真相机适配器 - 用于开发和测试",
+  "settings": {
+    "key": "value"
+  }
+}
+```
+
+- `adapter_type`: 必需，适配器类型名称
+- `description`: 可选，描述信息
+- `settings`: 可选，适配器特定设置
+
+### 插件配置格式
+
+```json
+{
+  "plugin_type": "deterministic-perception",
+  "description": "确定性感知插件 - 用于开发和测试",
+  "settings": {}
+}
+```
+
+- `plugin_type`: 必需，插件类型名称
+- `description`: 可选，描述信息
+- `settings`: 可选，插件特定设置
+
+### 向后兼容性
+
+原有内联配置格式仍然完全支持：
+
+```json
+{
+  "components": {
+    "vision": "simulated-camera"
+  }
+}
+```
+
+新旧格式可以混合使用：
+
+```json
+{
+  "components": {
+    "vision": "@adapters/simulated-camera.json",
+    "plugins": {
+      "perception": "deterministic-perception"
+    }
+  }
+}
+```
+
+### 特性
+
+- **相对路径解析**：引用路径相对于主配置文件所在目录
+- **循环检测**：自动检测并阻止循环引用
+- **类型提取**：自动从适配器/插件配置中提取类型名，保持与旧格式的兼容性
+- **嵌套引用**：支持在列表和嵌套对象中使用引用
+
+### 使用示例
+
+参考配置文件：
+- `development.json`：原有内联格式（继续支持）
+- `development-with-refs.json`：使用引用的示例
+
+运行测试：
+```bash
+poetry run python test_config_references.py
+```

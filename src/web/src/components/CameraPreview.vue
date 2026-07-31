@@ -2,13 +2,13 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import CameraAdapterPanel from './CameraAdapterPanel.vue'
-import CalibrationPanel from './CalibrationPanel.vue'
 import GripperControlPanel from './GripperControlPanel.vue'
 import HardwareAdapterSection from './HardwareAdapterSection.vue'
 import ObjectDetectionOverlay from './ObjectDetectionOverlay.vue'
 import ObjectPoseOverlay from './ObjectPoseOverlay.vue'
 import PluginWorkspace from './PluginWorkspace.vue'
 import PoseSkeletonOverlay from './PoseSkeletonOverlay.vue'
+import RecordingToolbar from './RecordingToolbar.vue'
 import RobotControlPanel from './RobotControlPanel.vue'
 import { type CameraState } from '../api/camera'
 import { useCameraPreview } from '../composables/useCameraPreview'
@@ -18,7 +18,7 @@ import { usePoseTracking } from '../composables/usePoseTracking'
 import { usePluginCatalog } from '../composables/usePluginCatalog'
 import { useVisionAnalysis } from '../composables/useVisionAnalysis'
 
-type AdapterTab = 'camera' | 'gripper' | 'robot' | 'calibration'
+type AdapterTab = 'camera' | 'gripper' | 'robot'
 const activeAdapterTab = ref<AdapterTab>('camera')
 
 const {
@@ -296,6 +296,8 @@ onBeforeUnmount(() => {
         </header>
 
         <div class="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-slate-800 bg-slate-950 shadow-inner">
+          <RecordingToolbar :camera-id="camera?.cameraId || 'hikvision-usb'" />
+
           <div v-if="streamUrl" class="relative inline-flex max-h-full max-w-full">
             <img
               ref="streamImage"
@@ -402,14 +404,6 @@ onBeforeUnmount(() => {
             >
               机械臂适配器
             </button>
-            <button
-              type="button"
-              class="flex-1 py-2 text-center text-xs font-bold transition border-b-2"
-              :class="activeAdapterTab === 'calibration' ? 'border-sky-500 text-sky-400 bg-slate-900/60' : 'border-transparent text-slate-400 hover:text-slate-200'"
-              @click="activeAdapterTab = 'calibration'"
-            >
-              相机标定
-            </button>
           </nav>
         </header>
 
@@ -435,9 +429,6 @@ onBeforeUnmount(() => {
           <HardwareAdapterSection v-show="activeAdapterTab === 'robot'" adapter-id="robot" label="机械臂适配器" test-id="robot-adapter">
             <RobotControlPanel />
           </HardwareAdapterSection>
-          <div v-show="activeAdapterTab === 'calibration'" class="h-full">
-            <CalibrationPanel />
-          </div>
         </div>
       </aside>
     </div>

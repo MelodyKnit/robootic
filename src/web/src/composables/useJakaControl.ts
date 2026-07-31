@@ -8,6 +8,7 @@ import {
   executeJointMovePreview,
   getRobotStatus,
   listRobots,
+  powerOnRobot,
   previewJointMove,
   reconnectRobot,
   type ArmRobotRequest,
@@ -271,6 +272,38 @@ export function useJakaControl() {
     void disarmRobot(robotId, token, true).catch(() => undefined)
   }
 
+  async function powerOn(): Promise<boolean> {
+    const robotId = robot.value?.id
+    const token = armToken.value
+    console.log('[powerOn] robotId:', robotId, 'token:', token, 'isBusy:', isBusy.value, 'isArmed:', isArmed.value)
+    if (robotId === undefined || token === null || isBusy.value || !isArmed.value) {
+      console.log('[powerOn] Early return - conditions not met')
+      return false
+    }
+    isBusy.value = true
+    errorMessage.value = null
+    operationState.value = 'submitting'
+    operationMessage.value = '正在请求控制器上电...'
+    try {
+      console.log('[powerOn] Calling powerOnRobot API...')
+      const result = await powerOnRobot(robotId, token, createIdempotencyKey())
+      console.log('[powerOn] API success:', result)
+      synchronizeStatus(result.status)
+      operationState.value = 'completed'
+      operationMessage.value = '机械臂控制器已上电。'
+      return true
+    } catch (error) {
+      console.error('[powerOn] API error:', error)
+      operationState.value = 'failed'
+      operationMessage.value = null
+      errorMessage.value = displayError(error)
+      return false
+    } finally {
+      isBusy.value = false
+      void refreshAfterOperation()
+    }
+  }
+
   async function enable(): Promise<boolean> {
     const robotId = robot.value?.id
     const token = armToken.value
@@ -376,6 +409,7 @@ export function useJakaControl() {
     nowSeconds,
     operationMessage,
     operationState,
+    powerOn,
     reconnect,
     robot,
   }

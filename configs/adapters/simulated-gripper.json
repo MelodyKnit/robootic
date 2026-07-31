@@ -1,0 +1,5 @@
+{
+  "adapter_type": "simulated-gripper",
+  "description": "仿真夹爪适配器 - 用于开发和测试",
+  "settings": {}
+}

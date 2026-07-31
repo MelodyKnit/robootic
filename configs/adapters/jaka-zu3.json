@@ -1,0 +1,11 @@
+{
+  "adapter_type": "jaka-robot",
+  "description": "JAKA节卡机器人适配器（ZU3系列）",
+  "settings": {
+    "controller_ip": "replace-with-local-controller-ip",
+    "allow_enable": false,
+    "allow_remote_power_on": false,
+    "allow_manual_motion": false,
+    "robot_model": "zu3"
+  }
+}

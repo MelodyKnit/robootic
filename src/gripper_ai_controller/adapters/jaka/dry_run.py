@@ -118,6 +118,12 @@ class JakaDryRunRobotAdapter(BaseAdapter, RobotAdapter):
         await self.startup()
         return await self.initialize()
 
+    async def operator_power_on(self) -> RobotStatus:
+        """Mark the in-memory target powered through the same manual-control contract."""
+
+        self.ensure_started()
+        return await self.initialize()
+
     async def operator_enable(self) -> RobotStatus:
         """Mark the in-memory target enabled through the same manual-control contract."""
 

@@ -191,6 +191,29 @@ def install_jaka_routes(
             return _error_for(error)
         return Response(status_code=204)
 
+    @application.post("/api/robots/{robot_id}/power-on", response_model=JakaOperationResponse)
+    async def power_on_robot(
+        robot_id: str,
+        control_token: Optional[str] = Header(None, alias="X-Robot-Control-Token"),
+        idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+    ):
+        """Power on the controller after local authorization and safety confirmation."""
+
+        missing = _unknown_robot_response(robot_id, service)
+        if missing is not None:
+            return missing
+        if idempotency_key is None:
+            return _error_response(
+                422,
+                "invalid_jaka_command",
+                "Idempotency-Key is required for power-on.",
+            )
+        try:
+            result = await service.power_on(control_token, idempotency_key)  # type: ignore[union-attr]
+        except JakaControlError as error:
+            return _error_for(error)
+        return _operation_response(result)
+
     @application.post("/api/robots/{robot_id}/enable", response_model=JakaOperationResponse)
     async def enable_robot(
         robot_id: str,

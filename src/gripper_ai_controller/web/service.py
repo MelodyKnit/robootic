@@ -441,6 +441,11 @@ class CameraPreviewService:
                 PoseTrackingSettings(),
                 pose_tracking_service,
             )
+        self._recorder = None  # type: Optional[Any]
+        if settings.recording_enabled:
+            from gripper_ai_controller.web.recorder import CameraRecorder
+            self._recorder = CameraRecorder(Path(settings.recording_output_dir))
+        self._latest_captured_frame = None  # type: Optional[ImageFrame]
 
     async def startup(self) -> None:
         """Begin the single shared acquisition task without starting any execution runtime.
@@ -1247,6 +1252,70 @@ class CameraPreviewService:
             (),
         )
 
+    async def capture_screenshot(self) -> Mapping[str, Any]:
+        """Capture one frame screenshot using the active recorder."""
+
+        if self._recorder is None:
+            raise RuntimeError("Recording capability is disabled.")
+        frame = self._latest_captured_frame
+        if frame is None:
+            raise RuntimeError("No camera frame captured yet for screenshot.")
+        filepath = self._recorder.capture_screenshot(frame)
+        return {
+            "success": True,
+            "filepath": str(filepath),
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    async def start_recording(self, fps: Optional[int] = None) -> Mapping[str, Any]:
+        """Start recording camera frames to video."""
+
+        if self._recorder is None:
+            raise RuntimeError("Recording capability is disabled.")
+        frame = self._latest_captured_frame
+        if frame is None:
+            raise RuntimeError("No camera frame captured yet to start recording.")
+        actual_fps = fps or self.settings.recording_default_fps
+        filepath = self._recorder.start_recording(frame, fps=actual_fps)
+        return {
+            "success": True,
+            "filepath": str(filepath),
+            "fps": actual_fps,
+        }
+
+    async def stop_recording(self) -> Mapping[str, Any]:
+        """Stop current video recording."""
+
+        if self._recorder is None:
+            raise RuntimeError("Recording capability is disabled.")
+        result = self._recorder.stop_recording()
+        if result is None:
+            raise RuntimeError("No active recording to stop.")
+        filepath, frame_count = result
+        return {
+            "success": True,
+            "filepath": str(filepath),
+            "frame_count": frame_count,
+            "duration_seconds": round(frame_count / max(1, self.settings.recording_default_fps), 2),
+        }
+
+    def get_recording_status(self) -> Mapping[str, Any]:
+        """Return live recording status."""
+
+        if self._recorder is None:
+            return {
+                "enabled": False,
+                "is_recording": False,
+                "frame_count": 0,
+                "output_dir": "",
+            }
+        return {
+            "enabled": True,
+            "is_recording": self._recorder.is_recording,
+            "frame_count": self._recorder.frame_count,
+            "output_dir": str(self._recorder.output_dir),
+        }
+
     async def _capture_loop(self) -> None:
         """Acquire, encode, and publish frames at the configured bounded rate."""
 
@@ -1271,6 +1340,9 @@ class CameraPreviewService:
                     if self.pose_tracking_service is not None:
                         pose_frame_scheduled = await self.pose_tracking_service.submit_frame(frame)
                     await self._jpeg_publisher.submit(frame, pose_frame_scheduled)
+                    self._latest_captured_frame = frame
+                    if self._recorder is not None and self._recorder.is_recording:
+                        self._recorder.write_frame(frame)
             except asyncio.CancelledError:
                 raise
             except CameraParameterRestoreError:
@@ -1299,7 +1371,11 @@ class CameraPreviewService:
                 await asyncio.sleep(remaining_seconds)
 
     def _on_jpeg_frame_published(self, frame: ImageFrame, encoded_frame: EncodedFrame) -> None:
-        """Offer a published frame to passive plugins without blocking JPEG fan-out."""
+        """Offer a published frame to passive plugins and optional recorder."""
+
+        self._latest_captured_frame = frame
+        if self._recorder is not None and self._recorder.is_recording:
+            self._recorder.write_frame(frame)
 
         if self.plugin_host is not None:
             async def retain_pose_source() -> None:

@@ -320,6 +320,43 @@ class ManualJakaControlService:
                 raise JakaUnavailableError(self._last_error) from error
         return self._public_status(self._last_status)
 
+    async def power_on(
+        self, token: Optional[str], idempotency_key: str
+    ) -> ManualJakaOperationResult:
+        """Power on the controller once after explicit local authorization.
+
+        Remote power-on requires allow_remote_power_on=True in local configuration.
+        This should only be enabled in controlled environments where the operator
+        can verify the work area is clear and safe.
+        """
+
+        self._require_controls_enabled()
+        self._require_manual_motion_enabled()
+        self._require_arm_token(token)
+
+        async def operation() -> ManualJakaStatus:
+            async with self._exclusive_operation():
+                status = await self._read_status()
+                if not status.connected or not status.initialized:
+                    raise JakaControlConflictError("JAKA must be connected before power-on.")
+                if status.faulted or status.emergency_stopped:
+                    raise JakaControlConflictError("JAKA fault or emergency-stop state prevents power-on.")
+                try:
+                    self._record_status(await self.robot.operator_power_on())
+                except PermissionError as error:
+                    raise JakaCapabilityError("JAKA remote power-on is disabled by local configuration.") from error
+                except Exception as error:
+                    self._clear_arm()
+                    self._last_error = "JAKA power-on failed."
+                    raise JakaUnavailableError(self._last_error) from error
+                if not self._last_status.powered:
+                    self._clear_arm()
+                    raise JakaControlConflictError("JAKA did not report powered state after power-on.")
+                self._refresh_arm(token)
+                return self._public_status(self._last_status)
+
+        return await self._run_idempotent(idempotency_key, ("power_on",), operation)
+
     async def enable(
         self, token: Optional[str], idempotency_key: str
     ) -> ManualJakaOperationResult:

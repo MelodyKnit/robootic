@@ -3,7 +3,7 @@
 import asyncio
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Tuple
 import cv2
 import numpy as np
 
@@ -49,14 +49,25 @@ class CameraRecorder:
         filepath = self.output_dir / filename
         
         # 转换图像格式
-        if frame.encoding == "bgr8":
-            image = frame.data
-        elif frame.encoding == "rgb8":
-            image = cv2.cvtColor(frame.data, cv2.COLOR_RGB2BGR)
-        elif frame.encoding in ("mono8", "mono16"):
+        pixel_format = (frame.pixel_format or "rgb8").lower()
+        if frame.pixel_payload is None:
+            raise RecordingError("Frame has no pixel payload.")
+            
+        # 从 bytes 解开图像矩阵或直接使用数据
+        if hasattr(frame, 'data') and isinstance(frame.data, np.ndarray):
             image = frame.data
         else:
-            raise RecordingError(f"Unsupported encoding: {frame.encoding}")
+            w = frame.width or 640
+            h = frame.height or 480
+            if pixel_format in ("rgb8", "bgr8"):
+                image = np.frombuffer(frame.pixel_payload, dtype=np.uint8).reshape((h, w, 3))
+            elif pixel_format in ("mono8", "mono16"):
+                image = np.frombuffer(frame.pixel_payload, dtype=np.uint8).reshape((h, w))
+            else:
+                raise RecordingError(f"Unsupported pixel format: {pixel_format}")
+
+        if pixel_format == "rgb8":
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
         
         # 保存图片
         success = cv2.imwrite(str(filepath), image, [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -89,7 +100,8 @@ class CameraRecorder:
         self._current_video_path = self.output_dir / filename
         
         # 获取帧尺寸
-        height, width = frame.data.shape[:2]
+        width = frame.width or 640
+        height = frame.height or 480
         
         # 创建视频写入器 (使用 MJPEG 编解码器,兼容性好)
         fourcc = cv2.VideoWriter_fourcc(*'MJPG')
@@ -121,20 +133,24 @@ class CameraRecorder:
         if not self._is_recording or self._video_writer is None:
             return
         
-        # 转换为BGR格式
-        if frame.encoding == "bgr8":
+        pixel_format = (frame.pixel_format or "rgb8").lower()
+        if frame.pixel_payload is None:
+            return
+
+        w = frame.width or 640
+        h = frame.height or 480
+        if hasattr(frame, 'data') and isinstance(frame.data, np.ndarray):
             image = frame.data
-        elif frame.encoding == "rgb8":
-            image = cv2.cvtColor(frame.data, cv2.COLOR_RGB2BGR)
-        elif frame.encoding in ("mono8", "mono16"):
-            # 转换灰度图为BGR
-            if frame.encoding == "mono16":
-                image = (frame.data / 256).astype(np.uint8)
-            else:
-                image = frame.data
+        elif pixel_format in ("rgb8", "bgr8"):
+            image = np.frombuffer(frame.pixel_payload, dtype=np.uint8).reshape((h, w, 3))
+        elif pixel_format in ("mono8", "mono16"):
+            image = np.frombuffer(frame.pixel_payload, dtype=np.uint8).reshape((h, w))
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         else:
-            return  # 跳过不支持的格式
+            return
+
+        if pixel_format == "rgb8":
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
         
         self._video_writer.write(image)
         self._frame_count += 1

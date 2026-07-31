@@ -1,0 +1,5 @@
+{
+  "plugin_type": "deterministic-perception",
+  "description": "确定性感知插件 - 用于开发和测试",
+  "settings": {}
+}
