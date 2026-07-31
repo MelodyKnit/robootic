@@ -75,6 +75,11 @@
       "gripper_adapter": "simulated-gripper"
     }
   ],
+  "jaka_control": {
+    "target_name": "sim-primary",
+    "joint_timeout_seconds": 30.0,
+    "arm_timeout_seconds": 60.0
+  },
   "safety": {
     "minimum_perception_confidence": 0.7,
     "maximum_perception_age_seconds": 2.0
@@ -87,8 +92,9 @@
     "jpeg_quality": 80,
     "capture_retry_seconds": 1.0,
     "camera_controls_enabled": true,
-    "gripper_controls_enabled": false,
-    "plugin_reload_enabled": false,
-    "plugin_lifecycle_controls_enabled": false
+    "gripper_controls_enabled": true,
+    "jaka_controls_enabled": true,
+    "plugin_reload_enabled": true,
+    "plugin_lifecycle_controls_enabled": true
   }
 }
