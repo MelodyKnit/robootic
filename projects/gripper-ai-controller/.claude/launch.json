@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dev-server",
+      "runtimeExecutable": "poetry",
+      "runtimeArgs": ["run", "gripper-ai-controller", "web", "--config-file", "configs/development.json"],
+      "port": 8000
+    },
+    {
+      "name": "test-server",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8080"],
+      "port": 8080,
+      "url": "http://localhost:8080/test-3d-viewer.html"
+    }
+  ]
+}
