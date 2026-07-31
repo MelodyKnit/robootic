@@ -57,3 +57,4 @@ src/gripper_ai_controller/adapters/hikvision/runtime/
 # --- virtualenv / poetry ---
 pip-wheel-metadata/
 share/python-wheels/
+localstore/
