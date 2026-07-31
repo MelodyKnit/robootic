@@ -45,6 +45,61 @@ _DEFAULT_CHARUCO_CAPTURE_INTERVAL_SECONDS = 2.0
 def add_calibration_commands(subparsers: Any) -> None:
     """Register explicit calibration subcommands on the application's parser."""
 
+    # 新增：全自动标定命令
+    auto_intrinsic = subparsers.add_parser(
+        "calibration-auto-intrinsic",
+        help="全自动相机内参标定：机械臂自动移动采集多角度ChArUco图像并计算内参。",
+    )
+    auto_intrinsic.add_argument(
+        "--config-file",
+        required=True,
+        help="完整运行配置 JSON，包含机器人和相机配置。",
+    )
+    auto_intrinsic.add_argument(
+        "--camera-id",
+        required=True,
+        help="相机标识符，用于标定结果标记。",
+    )
+    auto_intrinsic.add_argument(
+        "--calibration-id",
+        required=True,
+        help="标定批次标识符（唯一），用于结果追溯。",
+    )
+    auto_intrinsic.add_argument(
+        "--output-file",
+        required=True,
+        help="内参 JSON 输出路径，只能位于 localstore/。",
+    )
+    auto_intrinsic.add_argument(
+        "--workspace-center-x",
+        type=float,
+        default=300.0,
+        help="工作空间中心 X 坐标（mm），默认 300。",
+    )
+    auto_intrinsic.add_argument(
+        "--workspace-center-y",
+        type=float,
+        default=0.0,
+        help="工作空间中心 Y 坐标（mm），默认 0。",
+    )
+    auto_intrinsic.add_argument(
+        "--workspace-center-z",
+        type=float,
+        default=100.0,
+        help="工作空间中心 Z 坐标（mm），默认 100。",
+    )
+    auto_intrinsic.add_argument(
+        "--target-images",
+        type=int,
+        default=30,
+        help="目标采集图像数，默认 30。",
+    )
+    auto_intrinsic.add_argument(
+        "--save-images",
+        action="store_true",
+        help="保存采集的原始图像到输出目录（用于调试）。",
+    )
+
     generate = subparsers.add_parser(
         "calibration-generate-charuco",
         help="离线生成指定规格的 ChArUco 标定板图，不连接任何设备。",
@@ -151,7 +206,9 @@ def add_calibration_commands(subparsers: Any) -> None:
 def execute_calibration_command(args: argparse.Namespace) -> None:
     """Execute exactly one registered calibration command with its declared boundary."""
 
-    if args.command == "calibration-generate-charuco":
+    if args.command == "calibration-auto-intrinsic":
+        asyncio.run(_auto_intrinsic_calibration(args))
+    elif args.command == "calibration-generate-charuco":
         _generate_charuco(args)
     elif args.command == "calibration-capture-charuco":
         asyncio.run(_capture_charuco_images(args))
@@ -161,6 +218,82 @@ def execute_calibration_command(args: argparse.Namespace) -> None:
         _build_workcell_calibration(args)
     else:
         raise ValueError("Unsupported calibration command: {0}".format(args.command))
+
+
+async def _auto_intrinsic_calibration(args: argparse.Namespace) -> None:
+    """执行全自动相机内参标定：机械臂自动移动采集多角度图像并计算内参。"""
+
+    from gripper_ai_controller.calibration.auto_intrinsic import (
+        AutoIntrinsicCalibration,
+        AutoCalibrationConfig,
+    )
+    from gripper_ai_controller.bootstrap.runtime_builder import build_runtime
+
+    output_path = _localstore_path(args.output_file, "--output-file")
+
+    # 构建运行时（需要机器人和相机）
+    print("正在构建运行时系统...")
+    runtime = build_runtime(args.config_file)
+    await runtime.startup()
+
+    try:
+        # 获取机器人和相机适配器
+        if not runtime.targets:
+            raise RuntimeError("配置文件中未找到机器人目标")
+
+        target = runtime.targets[0]
+        robot_adapter = target.robot
+        vision_adapter = target.vision
+
+        if robot_adapter is None:
+            raise RuntimeError("配置文件中未配置机器人适配器")
+        if vision_adapter is None:
+            raise RuntimeError("配置文件中未配置相机适配器")
+
+        # 构造配置
+        config = AutoCalibrationConfig(
+            workspace_center=(
+                args.workspace_center_x,
+                args.workspace_center_y,
+                args.workspace_center_z,
+            ),
+            target_images=args.target_images,
+        )
+
+        # 创建自动标定器
+        calibrator = AutoIntrinsicCalibration(
+            robot_adapter=robot_adapter,
+            vision_adapter=vision_adapter,
+            config=config,
+        )
+
+        # 执行自动标定
+        print("\n开始自动标定流程...")
+        result = await calibrator.run(
+            calibration_id=args.calibration_id,
+            camera_id=args.camera_id,
+            output_path=str(output_path),
+            save_images=args.save_images,
+        )
+
+        print("\n标定结果摘要:")
+        print(json.dumps(
+            {
+                "output_file": str(output_path),
+                "camera_id": args.camera_id,
+                "calibration_id": args.calibration_id,
+                "reprojection_error_px": result["reprojection_error_px"],
+                "views_used": result["views_used"],
+                "image_size_px": result["image_size_px"],
+                "automated_capture": True,
+                "robot_motion": True,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ))
+
+    finally:
+        await runtime.shutdown()
 
 
 async def _capture_charuco_images(args: argparse.Namespace) -> None:

@@ -1,5 +1,6 @@
 """FastAPI application factory for browser camera preview and controlled parameters."""
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -1093,6 +1094,17 @@ def create_web_app(
             headers={"Cache-Control": "no-store"},
         )
 
+    # 录制和截图服务
+    recording_service = None
+    if preview_config.settings.recording_enabled:
+        from gripper_ai_controller.web.recording_service import RecordingService
+        recording_service = RecordingService(
+            output_dir=preview_config.settings.recording_output_dir,
+            default_fps=preview_config.settings.recording_default_fps,
+            enabled=True
+        )
+        _install_recording_routes(application, service, recording_service)
+
     install_gripper_routes(application, gripper_control_service)
     install_jaka_routes(application, jaka_control_service)
     _mount_frontend_if_present(application, frontend_dist_dir)
@@ -1570,6 +1582,118 @@ def _human_pose_response(person: HumanPose2D):
         "confidence": person.confidence,
         "joints": [_pose_joint_response(joint) for joint in person.joints],
     }
+
+
+def _install_recording_routes(application: FastAPI, camera_service, recording_service) -> None:
+    """Install camera recording and snapshot routes."""
+
+    @application.post("/api/cameras/{camera_id}/snapshot")
+    async def save_snapshot(camera_id: str, prefix: str = "snapshot"):
+        """Save current frame as JPEG snapshot."""
+        unknown = _unknown_camera_response(camera_id, camera_service.camera_id)
+        if unknown is not None:
+            return unknown
+
+        frame = await camera_service.hub.latest_frame()
+        if frame is None:
+            return _error_response(503, "camera_unavailable", "No frame available")
+
+        try:
+            filepath = await recording_service.save_snapshot(
+                frame.jpeg_payload,
+                camera_id,
+                prefix
+            )
+            return {"filepath": filepath, "size_bytes": len(frame.jpeg_payload)}
+        except Exception as e:
+            return _error_response(500, "snapshot_failed", str(e))
+
+    @application.post("/api/cameras/{camera_id}/recording/start")
+    async def start_recording(camera_id: str, fps: Optional[int] = None, prefix: str = "recording"):
+        """Start video recording."""
+        unknown = _unknown_camera_response(camera_id, camera_service.camera_id)
+        if unknown is not None:
+            return unknown
+
+        if recording_service.is_recording(camera_id):
+            return _error_response(409, "already_recording", "Camera is already recording")
+
+        try:
+            recording_id = await recording_service.start_recording(camera_id, fps, prefix=prefix)
+            # 启动后台任务来捕获帧
+            asyncio.create_task(_recording_loop(camera_service, recording_service, camera_id))
+            return {"recording_id": recording_id, "status": "started"}
+        except Exception as e:
+            return _error_response(500, "recording_start_failed", str(e))
+
+    @application.post("/api/cameras/{camera_id}/recording/stop")
+    async def stop_recording(camera_id: str):
+        """Stop video recording."""
+        unknown = _unknown_camera_response(camera_id, camera_service.camera_id)
+        if unknown is not None:
+            return unknown
+
+        result = await recording_service.stop_recording(camera_id)
+        if result is None:
+            return _error_response(404, "not_recording", "Camera is not recording")
+
+        return result
+
+    @application.get("/api/cameras/{camera_id}/recording/status")
+    async def recording_status(camera_id: str):
+        """Get current recording status."""
+        unknown = _unknown_camera_response(camera_id, camera_service.camera_id)
+        if unknown is not None:
+            return unknown
+
+        status = recording_service.get_recording_status(camera_id)
+        if status is None:
+            return {"is_recording": False}
+
+        return {"is_recording": True, **status}
+
+    @application.get("/api/recordings")
+    async def list_recordings(camera_id: Optional[str] = None):
+        """List all recordings."""
+        recordings = await recording_service.list_recordings(camera_id)
+        return {"recordings": recordings}
+
+    @application.get("/api/snapshots")
+    async def list_snapshots(camera_id: Optional[str] = None):
+        """List all snapshots."""
+        snapshots = await recording_service.list_snapshots(camera_id)
+        return {"snapshots": snapshots}
+
+    @application.delete("/api/recordings/{recording_id}")
+    async def delete_recording(recording_id: str):
+        """Delete a recording."""
+        success = await recording_service.delete_recording(recording_id)
+        if not success:
+            return _error_response(404, "recording_not_found", "Recording not found")
+        return {"status": "deleted"}
+
+    @application.delete("/api/snapshots/{filename}")
+    async def delete_snapshot(filename: str):
+        """Delete a snapshot."""
+        success = await recording_service.delete_snapshot(filename)
+        if not success:
+            return _error_response(404, "snapshot_not_found", "Snapshot not found")
+        return {"status": "deleted"}
+
+
+async def _recording_loop(camera_service, recording_service, camera_id: str):
+    """Background task to capture frames during recording."""
+    previous_frame = None
+    while recording_service.is_recording(camera_id):
+        try:
+            frame = await camera_service.hub.wait_for_frame(previous_frame)
+            if frame is None:
+                break
+            previous_frame = frame
+            await recording_service.add_frame(camera_id, frame.jpeg_payload)
+        except Exception:
+            break
+        await asyncio.sleep(0.001)  # 防止过度占用CPU
 
 
 def _mount_frontend_if_present(application: FastAPI, frontend_dist_dir: Optional[str]) -> None:

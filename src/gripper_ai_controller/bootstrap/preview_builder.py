@@ -201,6 +201,9 @@ def _build_web_settings(settings, runtime_mode=RuntimeMode.PRODUCTION):
         "jaka_controls_enabled",
         "plugin_reload_enabled",
         "plugin_lifecycle_controls_enabled",
+        "recording_enabled",
+        "recording_output_dir",
+        "recording_default_fps",
     }
     unknown = set(settings).difference(allowed)
     if unknown:
@@ -218,6 +221,9 @@ def _build_web_settings(settings, runtime_mode=RuntimeMode.PRODUCTION):
     plugin_lifecycle_controls_enabled = _boolean_setting(
         settings, "plugin_lifecycle_controls_enabled", False
     )
+    recording_enabled = _boolean_setting(settings, "recording_enabled", True)
+    recording_output_dir = _string_setting(settings, "recording_output_dir", "localstore/recordings")
+    recording_default_fps = _integer_setting(settings, "recording_default_fps", 30, 1, 60)
     if (gripper_controls_enabled or jaka_controls_enabled) and bind_host != "127.0.0.1":
         raise ValueError(
             "web.bind_host must be 127.0.0.1 when browser gripper or JAKA controls are enabled."
@@ -242,6 +248,9 @@ def _build_web_settings(settings, runtime_mode=RuntimeMode.PRODUCTION):
         jaka_controls_enabled=jaka_controls_enabled,
         plugin_reload_enabled=plugin_reload_enabled,
         plugin_lifecycle_controls_enabled=plugin_lifecycle_controls_enabled,
+        recording_enabled=recording_enabled,
+        recording_output_dir=recording_output_dir,
+        recording_default_fps=recording_default_fps,
     )
 
 

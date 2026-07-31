@@ -71,3 +71,24 @@ class ObjectDetectionPreviewSnapshot:
     snapshot: ObjectDetectionTrackingSnapshot
     latest_frame_at: Optional[float]
     overlay_fresh: bool
+
+
+@dataclass(frozen=True)
+class RecordingStatus:
+    """Current recording state exposed to browser clients."""
+
+    enabled: bool
+    is_recording: bool
+    frame_count: int
+    output_dir: str
+
+
+@dataclass(frozen=True)
+class RecordingResult:
+    """Result of a screenshot or recording operation."""
+
+    success: bool
+    filepath: str
+    frame_count: Optional[int] = None
+    duration_seconds: Optional[float] = None
+    timestamp: Optional[str] = None

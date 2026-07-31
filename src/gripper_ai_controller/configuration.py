@@ -79,6 +79,9 @@ class WebPreviewSettings:
     jaka_controls_enabled: bool = False
     plugin_reload_enabled: bool = False
     plugin_lifecycle_controls_enabled: bool = False
+    recording_enabled: bool = True
+    recording_output_dir: str = "localstore/recordings"
+    recording_default_fps: int = 30
 
 
 @dataclass(frozen=True)
