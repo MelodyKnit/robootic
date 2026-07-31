@@ -4,6 +4,7 @@ import { computed, ref, watch } from 'vue'
 import type { JointMovePreview, JointVector, RobotStatus } from '../api/robot'
 import { useJakaControl } from '../composables/useJakaControl'
 import RobotViewer3D from './RobotViewer3D.vue'
+import type { JointAngles } from './RobotModel'
 
 type ConfirmationMode = 'arm' | 'power-on' | 'enable' | 'move'
 
@@ -30,6 +31,7 @@ const jointNames = ['J1', 'J2', 'J3', 'J4', 'J5', 'J6'] as const
 const jointDraftDegrees = ref<number[]>([0, 0, 0, 0, 0, 0])
 const speedRadPerSecond = ref(0.1)
 const show3DViewer = ref(true) // 默认显示3D视图
+const viewer3DRef = ref<InstanceType<typeof RobotViewer3D> | null>(null)
 const stepDegrees = ref(2.0)
 const draftStepModeEnabled = ref(false)
 const confirmationMode = ref<ConfirmationMode | null>(null)
@@ -170,6 +172,29 @@ watch(isArmed, (armed) => {
     discardPreview()
   }
 })
+
+// 同步机器人关节角度到3D视图
+watch(
+  () => robot.value?.jointPositionsRad,
+  (jointPositions) => {
+    if (!jointPositions || !viewer3DRef.value) {
+      return
+    }
+
+    // 将关节角度转换为JointAngles格式
+    const angles: JointAngles = {
+      joint1: jointPositions[0],
+      joint2: jointPositions[1],
+      joint3: jointPositions[2],
+      joint4: jointPositions[3],
+      joint5: jointPositions[4],
+      joint6: jointPositions[5],
+    }
+
+    viewer3DRef.value.updateJointAngles(angles)
+  },
+  { immediate: true },
+)
 
 function openArmConfirmation(): void {
   workcellClear.value = false
@@ -380,7 +405,7 @@ function sameJointVector(first: JointVector, second: JointVector, tolerance = 0.
   <div class="robot-control-layout">
     <!-- 3D可视化区域 -->
     <div v-if="show3DViewer && robot" class="viewer-section">
-      <RobotViewer3D />
+      <RobotViewer3D ref="viewer3DRef" />
     </div>
 
     <!-- 控制面板区域 -->

@@ -7,6 +7,7 @@
 
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { RobotModel, type JointAngles } from './RobotModel'
 
 export class RobotScene {
   scene: THREE.Scene
@@ -14,6 +15,7 @@ export class RobotScene {
   renderer: THREE.WebGLRenderer
   controls: OrbitControls
   needsUpdate: boolean = true
+  robotModel: RobotModel | null = null
   private animationId: number | null = null
 
   constructor(canvas: HTMLCanvasElement) {
@@ -148,12 +150,66 @@ export class RobotScene {
   }
 
   /**
+   * 加载机器人URDF模型
+   */
+  async loadRobotModel(urdfPath: string): Promise<void> {
+    if (this.robotModel) {
+      console.warn('[RobotScene] Disposing existing robot model')
+      this.scene.remove(this.robotModel.getObject()!)
+      this.robotModel.dispose()
+    }
+
+    this.robotModel = new RobotModel()
+    await this.robotModel.load(urdfPath)
+
+    const robotObject = this.robotModel.getObject()
+    if (robotObject) {
+      this.scene.add(robotObject)
+      this.needsUpdate = true
+      console.log('[RobotScene] Robot model added to scene')
+    }
+  }
+
+  /**
+   * 更新机器人关节角度
+   */
+  updateRobotAngles(angles: JointAngles): void {
+    if (!this.robotModel) {
+      console.warn('[RobotScene] Cannot update angles: robot model not loaded')
+      return
+    }
+
+    this.robotModel.setJointAngles(angles)
+    this.needsUpdate = true
+  }
+
+  /**
+   * 获取当前机器人关节角度
+   */
+  getRobotAngles(): JointAngles | null {
+    return this.robotModel?.getJointAngles() ?? null
+  }
+
+  /**
+   * 检查机器人模型是否已加载
+   */
+  isRobotLoaded(): boolean {
+    return this.robotModel?.isLoaded() ?? false
+  }
+
+  /**
    * Cleanup resources
    */
   dispose(): void {
     this.stopRenderLoop()
     this.controls.dispose()
     this.renderer.dispose()
+
+    // Dispose robot model
+    if (this.robotModel) {
+      this.robotModel.dispose()
+      this.robotModel = null
+    }
 
     // Dispose all geometries and materials
     this.scene.traverse((object) => {
