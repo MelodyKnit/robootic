@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import CameraAdapterPanel from './CameraAdapterPanel.vue'
+import CalibrationPanel from './CalibrationPanel.vue'
 import GripperControlPanel from './GripperControlPanel.vue'
 import HardwareAdapterSection from './HardwareAdapterSection.vue'
 import ObjectDetectionOverlay from './ObjectDetectionOverlay.vue'
@@ -17,7 +18,7 @@ import { usePoseTracking } from '../composables/usePoseTracking'
 import { usePluginCatalog } from '../composables/usePluginCatalog'
 import { useVisionAnalysis } from '../composables/useVisionAnalysis'
 
-type AdapterTab = 'camera' | 'gripper' | 'robot'
+type AdapterTab = 'camera' | 'gripper' | 'robot' | 'calibration'
 const activeAdapterTab = ref<AdapterTab>('camera')
 
 const {
@@ -401,6 +402,14 @@ onBeforeUnmount(() => {
             >
               机械臂适配器
             </button>
+            <button
+              type="button"
+              class="flex-1 py-2 text-center text-xs font-bold transition border-b-2"
+              :class="activeAdapterTab === 'calibration' ? 'border-sky-500 text-sky-400 bg-slate-900/60' : 'border-transparent text-slate-400 hover:text-slate-200'"
+              @click="activeAdapterTab = 'calibration'"
+            >
+              相机标定
+            </button>
           </nav>
         </header>
 
@@ -426,6 +435,9 @@ onBeforeUnmount(() => {
           <HardwareAdapterSection v-show="activeAdapterTab === 'robot'" adapter-id="robot" label="机械臂适配器" test-id="robot-adapter">
             <RobotControlPanel />
           </HardwareAdapterSection>
+          <div v-show="activeAdapterTab === 'calibration'" class="h-full">
+            <CalibrationPanel />
+          </div>
         </div>
       </aside>
     </div>
